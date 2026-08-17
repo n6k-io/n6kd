@@ -29,7 +29,7 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
-	"github.com/n6k-io/duckdb-driver/packages/go/engine"
+	"github.com/n6k-io/n6kd/engine"
 )
 
 // Bounds a corrupt length prefix from the extension; far above any real frame.

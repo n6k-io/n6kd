@@ -13,9 +13,9 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/n6k-io/duckdb-driver/packages/go/engine"
-	"github.com/n6k-io/duckdb-driver/packages/go/perms"
-	"github.com/n6k-io/duckdb-driver/packages/go/server"
+	"github.com/n6k-io/n6kd/engine"
+	"github.com/n6k-io/n6kd/perms"
+	"github.com/n6k-io/n6kd/server"
 )
 
 func Execute() error {

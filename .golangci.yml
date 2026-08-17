@@ -1,0 +1,45 @@
+version: "2"
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - gosec
+    - gocyclo
+    - revive
+    - modernize
+  settings:
+    gocyclo:
+      min-complexity: 22
+    revive:
+      rules:
+        - name: package-comments
+          disabled: true
+        - name: file-length-limit
+          severity: error
+          exclude: ["**/*_test.go"]
+          arguments:
+            - max: 300
+              skip-comments: true
+              skip-blank-lines: true
+    
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+
+  settings:
+    goimports:
+      # A list of prefixes, which, if set, checks import paths
+      # with the given prefixes are grouped after 3rd-party packages.
+      # Default: []
+      local-prefixes:
+        - github.com/risk-guard

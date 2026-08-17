@@ -1,4 +1,4 @@
-module github.com/n6k-io/duckdb-driver/packages/go
+module github.com/n6k-io/n6kd
 
 go 1.26.4
 

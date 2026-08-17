@@ -13,7 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/n6k-io/duckdb-driver/packages/go/perms"
+	"github.com/n6k-io/n6kd/perms"
 )
 
 // Session is one client's view: its own database, carrying only the bridged

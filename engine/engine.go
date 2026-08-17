@@ -22,7 +22,7 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 	"go.uber.org/zap"
 
-	"github.com/n6k-io/duckdb-driver/packages/go/perms"
+	"github.com/n6k-io/n6kd/perms"
 )
 
 // ExtensionDirEnv mirrors the Python loader, so both find the same local build.

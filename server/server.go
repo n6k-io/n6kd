@@ -13,7 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
-	"github.com/n6k-io/duckdb-driver/packages/go/engine"
+	"github.com/n6k-io/n6kd/engine"
 )
 
 // How long in-flight requests get to finish after a shutdown signal.

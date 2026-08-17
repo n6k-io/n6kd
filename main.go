@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/n6k-io/duckdb-driver/packages/go/cli"
+	"github.com/n6k-io/n6kd/cli"
 )
 
 func main() {

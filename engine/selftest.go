@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/n6k-io/duckdb-driver/packages/go/perms"
+	"github.com/n6k-io/n6kd/perms"
 )
 
 const selftestSchema = `

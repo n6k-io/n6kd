@@ -12,8 +12,8 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 	"go.uber.org/zap/zaptest"
 
-	"github.com/n6k-io/duckdb-driver/packages/go/engine"
-	"github.com/n6k-io/duckdb-driver/packages/go/perms"
+	"github.com/n6k-io/n6kd/engine"
+	"github.com/n6k-io/n6kd/perms"
 )
 
 const schemaSQL = `
