@@ -1,0 +1,411 @@
+package engine_test
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"go.uber.org/zap/zaptest"
+
+	"github.com/n6k-io/duckdb-driver/packages/go/engine"
+	"github.com/n6k-io/duckdb-driver/packages/go/perms"
+)
+
+const schemaSQL = `
+CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR);
+INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace');
+CREATE TABLE audit_log (id INTEGER PRIMARY KEY, action VARCHAR);
+INSERT INTO audit_log VALUES (1, 'login');
+`
+
+const permsYAML = `
+version: 1
+source:
+  catalog: memory
+  schema: main
+catalogs:
+  app:
+    schema: main
+    tables:
+      users: readwrite
+      audit_log: read
+    primary_keys:
+      users: [id]
+`
+
+// open builds an engine from the fixtures above, skipping when the extensions
+// have not been built — this needs the real n6k_bridge, not a stand-in.
+func open(t *testing.T) *engine.Engine {
+	t.Helper()
+	if os.Getenv(engine.ExtensionDirEnv) == "" {
+		t.Skipf("%s not set", engine.ExtensionDirEnv)
+	}
+
+	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "schema.sql")
+	permsPath := filepath.Join(dir, "perms.yml")
+	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(permsPath, []byte(permsYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := perms.Load(permsPath)
+	if err != nil {
+		t.Fatalf("load perms: %v", err)
+	}
+	eng, err := engine.Open(t.Context(), engine.Options{SchemaPath: schemaPath, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := eng.Close(); err != nil {
+			t.Errorf("close engine: %v", err)
+		}
+	})
+	return eng
+}
+
+func newSession(t *testing.T, eng *engine.Engine) *engine.Session {
+	t.Helper()
+	session, err := eng.NewSession(t.Context(), zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Errorf("close session: %v", err)
+		}
+	})
+	return session
+}
+
+// A session reads rows that live in the source database, not in its own.
+func TestSessionReadsBridgedRows(t *testing.T) {
+	session := newSession(t, open(t))
+
+	var count int
+	if err := session.DB().QueryRowContext(t.Context(),
+		`SELECT count(*) FROM app.main.users`).Scan(&count); err != nil {
+		t.Fatalf("query bridged table: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("app.main.users: got %d rows, want 2", count)
+	}
+}
+
+func TestReadWriteTableAcceptsInsert(t *testing.T) {
+	session := newSession(t, open(t))
+
+	if _, err := session.DB().ExecContext(t.Context(),
+		`INSERT INTO app.main.users VALUES (3, 'Katherine')`); err != nil {
+		t.Fatalf("insert into readwrite table: %v", err)
+	}
+
+	var count int
+	if err := session.DB().QueryRowContext(t.Context(),
+		`SELECT count(*) FROM app.main.users`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Errorf("after insert: got %d rows, want 3", count)
+	}
+}
+
+// audit_log is read in the fixture perms, so an INSERT through the bridge fails.
+func TestReadOnlyTableRejectsInsert(t *testing.T) {
+	session := newSession(t, open(t))
+
+	_, err := session.DB().ExecContext(t.Context(),
+		`INSERT INTO app.main.audit_log VALUES (2, 'logout')`)
+	if err == nil {
+		t.Fatal("insert into read-only table succeeded, want a permission error")
+	}
+	t.Logf("rejected as expected: %v", err)
+}
+
+// A table the schema created but perms.yml never named must not be reachable.
+func TestUnlistedTableIsNotBridged(t *testing.T) {
+	session := newSession(t, open(t))
+
+	var count int
+	err := session.DB().QueryRowContext(t.Context(),
+		`SELECT count(*) FROM app.main.secrets`).Scan(&count)
+	if err == nil {
+		t.Fatal("unlisted table was reachable")
+	}
+}
+
+func openDirect(t *testing.T) *engine.Engine {
+	t.Helper()
+	if os.Getenv(engine.ExtensionDirEnv) == "" {
+		t.Skipf("%s not set", engine.ExtensionDirEnv)
+	}
+
+	schemaPath := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.Open(t.Context(), engine.Options{SchemaPath: schemaPath}, zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := eng.Close(); err != nil {
+			t.Errorf("close engine: %v", err)
+		}
+	})
+	return eng
+}
+
+func TestDirectModeServesEverySourceTable(t *testing.T) {
+	eng := openDirect(t)
+	if got := eng.Catalogs(); !slices.Contains(got, "memory") {
+		t.Fatalf("catalogs = %v, want the source catalog", got)
+	}
+	session := newSession(t, eng)
+
+	// audit_log is the table perms.yml would have made read-only.
+	for _, table := range []string{"users", "audit_log"} {
+		var count int
+		if err := session.DB().QueryRowContext(t.Context(),
+			`SELECT count(*) FROM memory.main.`+table).Scan(&count); err != nil {
+			t.Fatalf("query %s: %v", table, err)
+		}
+	}
+	if _, err := session.DB().ExecContext(t.Context(),
+		`INSERT INTO memory.main.audit_log VALUES (2, 'logout')`); err != nil {
+		t.Fatalf("insert without perms: %v", err)
+	}
+}
+
+func TestDirectModeSessionCloseLeavesSourceOpen(t *testing.T) {
+	eng := openDirect(t)
+
+	session, err := eng.NewSession(t.Context(), zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+
+	next := newSession(t, eng)
+	var count int
+	if err := next.DB().QueryRowContext(t.Context(),
+		`SELECT count(*) FROM memory.main.users`).Scan(&count); err != nil {
+		t.Fatalf("query after a session closed: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("memory.main.users: got %d rows, want 2", count)
+	}
+}
+
+// Lockdown has to survive the bridge: the session still reads its catalogs, but
+// the filesystem is gone and cannot be turned back on.
+func TestLockdownBlocksFileAccessInBridgedSession(t *testing.T) {
+	if os.Getenv(engine.ExtensionDirEnv) == "" {
+		t.Skipf("%s not set", engine.ExtensionDirEnv)
+	}
+
+	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "schema.sql")
+	permsPath := filepath.Join(dir, "perms.yml")
+	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(permsPath, []byte(permsYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := perms.Load(permsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.Open(t.Context(),
+		engine.Options{SchemaPath: schemaPath, Perms: rules, Lockdown: true}, zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := eng.Close(); err != nil {
+			t.Errorf("close engine: %v", err)
+		}
+	})
+	session := newSession(t, eng)
+
+	var count int
+	if err := session.DB().QueryRowContext(t.Context(),
+		`SELECT count(*) FROM app.main.users`).Scan(&count); err != nil {
+		t.Fatalf("bridged read under lockdown: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("app.main.users: got %d rows, want 2", count)
+	}
+
+	if _, err := session.DB().QueryContext(t.Context(),
+		`SELECT * FROM read_csv('`+permsPath+`')`); err == nil {
+		t.Error("read_csv reached the filesystem under lockdown")
+	}
+	// enable_external_access is refused on any running database, locked or not,
+	// so lock_configuration is what this message distinguishes.
+	_, err = session.DB().ExecContext(t.Context(), `SET enable_external_access=true`)
+	if err == nil || !strings.Contains(err.Error(), "locked") {
+		t.Errorf("lockdown was reversible: %v", err)
+	}
+}
+
+func TestLockdownBlocksFileAccessInDirectMode(t *testing.T) {
+	if os.Getenv(engine.ExtensionDirEnv) == "" {
+		t.Skipf("%s not set", engine.ExtensionDirEnv)
+	}
+
+	schemaPath := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.Open(t.Context(),
+		engine.Options{SchemaPath: schemaPath, Lockdown: true}, zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := eng.Close(); err != nil {
+			t.Errorf("close engine: %v", err)
+		}
+	})
+	session := newSession(t, eng)
+
+	var count int
+	if err := session.DB().QueryRowContext(t.Context(),
+		`SELECT count(*) FROM memory.main.users`).Scan(&count); err != nil {
+		t.Fatalf("direct read under lockdown: %v", err)
+	}
+	if _, err := session.DB().QueryContext(t.Context(),
+		`SELECT * FROM read_csv('`+schemaPath+`')`); err == nil {
+		t.Error("read_csv reached the filesystem under lockdown")
+	}
+}
+
+// The control for the lockdown tests: with Lockdown false, file access works.
+func TestWithoutLockdownFileAccessStillWorks(t *testing.T) {
+	csv := filepath.Join(t.TempDir(), "rows.csv")
+	if err := os.WriteFile(csv, []byte("id,name\n1,Ada\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := newSession(t, open(t))
+
+	var count int
+	if err := session.DB().QueryRowContext(t.Context(),
+		`SELECT count(*) FROM read_csv('`+csv+`')`).Scan(&count); err != nil {
+		t.Errorf("file access was restricted without lockdown: %v", err)
+	}
+}
+
+// openFails is the negative half of open: a schema and perms.yml that must not
+// produce a running engine.
+func openFails(t *testing.T, schema, permsYML string) error {
+	t.Helper()
+	if os.Getenv(engine.ExtensionDirEnv) == "" {
+		t.Skipf("%s not set", engine.ExtensionDirEnv)
+	}
+
+	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "schema.sql")
+	permsPath := filepath.Join(dir, "perms.yml")
+	if err := os.WriteFile(schemaPath, []byte(schema), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(permsPath, []byte(permsYML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := perms.Load(permsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.Open(context.Background(), engine.Options{SchemaPath: schemaPath, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	if err == nil {
+		_ = eng.Close()
+		t.Fatal("engine opened despite an invalid configuration")
+	}
+	return err
+}
+
+func TestMissingTableFailsAtStartup(t *testing.T) {
+	// The schema omits audit_log, which perms.yml still names.
+	err := openFails(t, "CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR);", permsYAML)
+	t.Logf("refused as expected: %v", err)
+}
+
+// resolvePrimaryKey refuses a readwrite table with no key, so Open fails.
+func TestWritableTableWithoutPrimaryKeyFailsAtStartup(t *testing.T) {
+	const schema = `CREATE TABLE events (id INTEGER, action VARCHAR);`
+	const rules = `
+version: 1
+catalogs:
+  app:
+    tables:
+      events: readwrite
+`
+	err := openFails(t, schema, rules)
+	if !strings.Contains(err.Error(), "no primary key") {
+		t.Errorf("got %v, want a missing primary key error", err)
+	}
+}
+
+func TestPrimaryKeyOverrideWithUnknownColumnFailsAtStartup(t *testing.T) {
+	const schema = `CREATE TABLE events (id INTEGER, action VARCHAR);`
+	const rules = `
+version: 1
+catalogs:
+  app:
+    tables:
+      events: readwrite
+    primary_keys:
+      events: [event_id]
+`
+	err := openFails(t, schema, rules)
+	if !strings.Contains(err.Error(), "event_id") {
+		t.Errorf("got %v, want an unknown column error naming event_id", err)
+	}
+}
+
+// A writable table whose key is declared in the schema needs no override.
+func TestDiscoveredPrimaryKeyNeedsNoOverride(t *testing.T) {
+	if os.Getenv(engine.ExtensionDirEnv) == "" {
+		t.Skipf("%s not set", engine.ExtensionDirEnv)
+	}
+
+	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "schema.sql")
+	permsPath := filepath.Join(dir, "perms.yml")
+	if err := os.WriteFile(schemaPath,
+		[]byte("CREATE TABLE events (id INTEGER PRIMARY KEY, action VARCHAR);"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(permsPath, []byte(`
+version: 1
+catalogs:
+  app:
+    tables:
+      events: readwrite
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := perms.Load(permsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.Open(t.Context(), engine.Options{SchemaPath: schemaPath, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	if err := eng.Close(); err != nil {
+		t.Errorf("close engine: %v", err)
+	}
+}

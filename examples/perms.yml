@@ -1,0 +1,17 @@
+version: 1
+
+# Where foo.sql's tables landed. A bare CREATE TABLE goes to memory.main.
+source:
+  catalog: memory
+  schema: main
+
+# Each key is a catalog name the client ATTACHes.
+catalogs:
+  app:
+    schema: main
+    tables:
+      users: readwrite
+      audit_log: read
+    # Only needed where the bridge cannot discover the key itself.
+    primary_keys:
+      users: [id]

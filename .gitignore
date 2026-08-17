@@ -1,0 +1,25 @@
+# Build output
+/n6kd
+/tmp/
+/out/
+
+# Local working files
+/scratch/
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+
+# DuckDB files a local run leaves behind
+*.db
+*.db.wal
+*.duckdb
+*.duckdb.wal
+
+# Local environment
+.env
+.env.local
+
+# macOS
+.DS_Store
