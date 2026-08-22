@@ -24,14 +24,11 @@ INSERT INTO audit_log VALUES (1, 'login');
 `
 
 const permsYAML = `
-version: 1
-catalogs:
-  app:
-    tables:
-      users: readwrite
-      audit_log: read
-    primary_keys:
-      users: [id]
+expose:
+  app.users: readwrite
+  app.audit_log: read
+keys:
+  app.users: [id]
 `
 
 // newTestServer serves the fixtures above over the real /ws route.
@@ -170,7 +167,7 @@ func attachWithToken(t *testing.T, srv *httptest.Server, token string) error {
 
 	extDir := os.Getenv(engine.ExtensionDirEnv)
 	if _, err := db.ExecContext(t.Context(),
-		fmt.Sprintf("LOAD '%s'", filepath.Join(extDir, "n6k", "n6k.duckdb_extension"))); err != nil {
+		fmt.Sprintf("LOAD '%s'", filepath.Join(extDir, "n6k_client", "n6k_client.duckdb_extension"))); err != nil {
 		t.Fatalf("load n6k client extension: %v", err)
 	}
 
@@ -223,7 +220,7 @@ func TestAPIKeyInDirectMode(t *testing.T) {
 
 			extDir := os.Getenv(engine.ExtensionDirEnv)
 			if _, err := db.ExecContext(t.Context(),
-				fmt.Sprintf("LOAD '%s'", filepath.Join(extDir, "n6k", "n6k.duckdb_extension"))); err != nil {
+				fmt.Sprintf("LOAD '%s'", filepath.Join(extDir, "n6k_client", "n6k_client.duckdb_extension"))); err != nil {
 				t.Fatal(err)
 			}
 
@@ -355,7 +352,7 @@ func newClientAs(t *testing.T, srv *httptest.Server, alias, catalog string) *sql
 
 	extDir := os.Getenv(engine.ExtensionDirEnv)
 	if _, err := db.ExecContext(t.Context(),
-		fmt.Sprintf("LOAD '%s'", filepath.Join(extDir, "n6k", "n6k.duckdb_extension"))); err != nil {
+		fmt.Sprintf("LOAD '%s'", filepath.Join(extDir, "n6k_client", "n6k_client.duckdb_extension"))); err != nil {
 		t.Fatalf("load n6k client extension: %v", err)
 	}
 

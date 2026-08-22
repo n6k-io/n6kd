@@ -90,8 +90,8 @@ func newRootCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				log.Infof("loaded perms %s (version %d, source %s, %s)",
-					cfg.PermsPath, rules.Version,
+				log.Infof("loaded perms %s (source %s, %s)",
+					cfg.PermsPath,
 					rules.Source.Catalog+"."+rules.Source.Schema,
 					plural(len(rules.Catalogs), "catalog"))
 			}
@@ -145,7 +145,7 @@ func newInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Download the n6k DuckDB extensions into DuckDB's extension directory",
-		Long: "Installs the extensions this server loads (n6k_bridge, n6k, n6k_server) from\n" +
+		Long: "Installs the extensions this server loads (virtual_catalog, n6k_client, n6k_server) from\n" +
 			"the release bucket. Set " + engine.ExtensionHomeEnv + " to choose where they land and\n" +
 			engine.ExtensionRepoEnv + " to install from somewhere other than the default bucket.",
 		Args: cobra.NoArgs,

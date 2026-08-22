@@ -2,8 +2,8 @@
 // the schema file created, and one bridged database per client session.
 //
 // The source is never handed to a client: a session gets a separate database
-// whose catalogs are attached TYPE n6k_bridge and populated by
-// n6k_bridge_setup_bridge from the tables perms.yml names.
+// whose catalogs are attached TYPE virtual_catalog and populated by
+// vcat_setup_bridge from the tables perms.yml names.
 package engine
 
 import (
@@ -39,11 +39,11 @@ const ExtensionRepoEnv = "N6K_EXTENSION_REPO"
 
 const defaultExtensionRepo = "https://storage.googleapis.com/n6k-duckdb-release"
 
-// The source only answers bridge scans (n6k_bridge). A session is also the end
-// of a client's socket, which needs n6k and n6k_server.
+// The source only answers bridge scans (virtual_catalog). A session is also
+// the end of a client's socket, which needs n6k_client and n6k_server.
 var (
-	sourceExtensions  = []string{"n6k_bridge"}
-	sessionExtensions = []string{"n6k_bridge", "n6k", "n6k_server"}
+	sourceExtensions  = []string{"virtual_catalog"}
+	sessionExtensions = []string{"virtual_catalog", "n6k_client", "n6k_server"}
 )
 
 // InstallExtensions downloads every extension a session can need into DuckDB's
@@ -255,7 +255,7 @@ func (e *Engine) requireSourceTable(ctx context.Context, catalog, table string) 
 	return nil
 }
 
-// resolvePrimaryKey mirrors what n6k_bridge_register_source does for a writable
+// resolvePrimaryKey mirrors what vcat_register_source does for a writable
 // table: take the perms.yml override if there is one, otherwise discover the
 // declared key, and refuse the table if neither yields columns. The override is
 // additionally checked against duckdb_columns().

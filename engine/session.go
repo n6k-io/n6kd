@@ -78,7 +78,7 @@ func (e *Engine) attachBridge(ctx context.Context, db *sql.DB, name string, cata
 
 	var token string
 	err = e.source.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT n6k_bridge_register_source(?, ?, ?, %s, %s)",
+		fmt.Sprintf("SELECT vcat_register_source(?, ?, ?, %s, %s)",
 			mapLiteral(catalog.Tables), mapLiteral(primaryKeyMap(catalog.PrimaryKeys))),
 		bridgeID, e.opts.Perms.Source.Catalog, e.opts.Perms.Source.Schema,
 	).Scan(&token)
@@ -87,7 +87,7 @@ func (e *Engine) attachBridge(ctx context.Context, db *sql.DB, name string, cata
 	}
 
 	stmts := []string{
-		fmt.Sprintf("ATTACH ':memory:' AS %s (TYPE n6k_bridge)", quoteIdent(name)),
+		fmt.Sprintf("ATTACH ':memory:' AS %s (TYPE virtual_catalog)", quoteIdent(name)),
 		// The bridge requires the target schema to exist before it is set up.
 		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.%s", quoteIdent(name), quoteIdent(catalog.Schema)),
 	}
@@ -99,7 +99,7 @@ func (e *Engine) attachBridge(ctx context.Context, db *sql.DB, name string, cata
 
 	var status string
 	err = db.QueryRowContext(ctx,
-		"SELECT n6k_bridge_setup_bridge(?, ?, ?, ?)",
+		"SELECT vcat_setup_bridge(?, ?, ?, ?)",
 		bridgeID, token, name, catalog.Schema,
 	).Scan(&status)
 	if err != nil {

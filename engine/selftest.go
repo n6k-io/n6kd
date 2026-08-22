@@ -19,18 +19,12 @@ INSERT INTO audit_log VALUES (1, 'login');
 `
 
 const selftestPerms = `
-version: 1
-source:
-  catalog: memory
-  schema: main
-catalogs:
-  app:
-    schema: main
-    tables:
-      users: readwrite
-      audit_log: read
-    primary_keys:
-      users: [id]
+source: memory.main
+expose:
+  app.users: readwrite
+  app.audit_log: read
+keys:
+  app.users: [id]
 `
 
 // SelfTest runs a whole engine against fixtures of its own: it loads the three

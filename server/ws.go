@@ -35,8 +35,9 @@ import (
 // Bounds a corrupt length prefix from the extension; far above any real frame.
 const maxFrameBytes = 1 << 30
 
-// How long the serving CALL gets to unwind after the socket drops.
-const serveJoinTimeout = 5 * time.Second
+// How long the serving CALL gets to unwind after the socket drops. Above the
+// reactor's own 5s drain of in-flight queries, which this has to outlast.
+const serveJoinTimeout = 15 * time.Second
 
 var upgrader = websocket.Upgrader{
 	// Any origin is accepted: access is decided by perms.yml and the n6k_authorize
@@ -136,10 +137,16 @@ func serveSession(ctx context.Context, ws *websocket.Conn, eng *engine.Engine, l
 	if err != nil {
 		return fmt.Errorf("socketpair: %w", err)
 	}
-	// Our end. The extension's end stays a bare descriptor: wrapping it in an
-	// os.File would hand it to Go's poller and make it non-blocking, which is not
-	// what the reactor expects to adopt.
+	// Our end, non-blocking or os.NewFile keeps it off Go's poller — and off the
+	// poller Close defers close(2) until the parked pump read returns, which is
+	// itself waiting on the EOF that close was meant to send.
+	if err := syscall.SetNonblock(fds[0], true); err != nil {
+		return errors.Join(fmt.Errorf("set the host socket non-blocking: %w", err),
+			syscall.Close(fds[0]), syscall.Close(fds[1]))
+	}
 	host := os.NewFile(uintptr(fds[0]), "n6k-host")
+	// The extension's end stays a bare descriptor, and blocking: the reactor reads
+	// it with plain read(2), retrying EINTR but not EAGAIN.
 	extFD := fds[1]
 	// Held open for the whole session, not closed right after the CALL is issued:
 	// the extension does not dup() until Adopt runs on a worker thread.

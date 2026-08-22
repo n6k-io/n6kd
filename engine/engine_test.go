@@ -22,22 +22,16 @@ INSERT INTO audit_log VALUES (1, 'login');
 `
 
 const permsYAML = `
-version: 1
-source:
-  catalog: memory
-  schema: main
-catalogs:
-  app:
-    schema: main
-    tables:
-      users: readwrite
-      audit_log: read
-    primary_keys:
-      users: [id]
+source: memory.main
+expose:
+  app.users: readwrite
+  app.audit_log: read
+keys:
+  app.users: [id]
 `
 
 // open builds an engine from the fixtures above, skipping when the extensions
-// have not been built — this needs the real n6k_bridge, not a stand-in.
+// have not been built — this needs the real virtual_catalog, not a stand-in.
 func open(t *testing.T) *engine.Engine {
 	t.Helper()
 	if os.Getenv(engine.ExtensionDirEnv) == "" {
@@ -345,11 +339,8 @@ func TestMissingTableFailsAtStartup(t *testing.T) {
 func TestWritableTableWithoutPrimaryKeyFailsAtStartup(t *testing.T) {
 	const schema = `CREATE TABLE events (id INTEGER, action VARCHAR);`
 	const rules = `
-version: 1
-catalogs:
-  app:
-    tables:
-      events: readwrite
+expose:
+  app.events: readwrite
 `
 	err := openFails(t, schema, rules)
 	if !strings.Contains(err.Error(), "no primary key") {
@@ -360,13 +351,10 @@ catalogs:
 func TestPrimaryKeyOverrideWithUnknownColumnFailsAtStartup(t *testing.T) {
 	const schema = `CREATE TABLE events (id INTEGER, action VARCHAR);`
 	const rules = `
-version: 1
-catalogs:
-  app:
-    tables:
-      events: readwrite
-    primary_keys:
-      events: [event_id]
+expose:
+  app.events: readwrite
+keys:
+  app.events: [event_id]
 `
 	err := openFails(t, schema, rules)
 	if !strings.Contains(err.Error(), "event_id") {
@@ -388,11 +376,8 @@ func TestDiscoveredPrimaryKeyNeedsNoOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(permsPath, []byte(`
-version: 1
-catalogs:
-  app:
-    tables:
-      events: readwrite
+expose:
+  app.events: readwrite
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
