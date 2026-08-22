@@ -27,11 +27,18 @@ func varcharToVarchar() duckdb.ScalarFuncConfig {
 // getenvUDF is getenv(name) -> VARCHAR, the same function the duckdb CLI adds,
 // NULL when unset. Armed only while a -f file runs: -c has the shell's own
 // substitution, and the server's environment holds material (API keys, tokens)
-// a served connection must not read. An interval body that needs an env value
-// captures it at boot with SET VARIABLE.
+// a served connection must not read.
+//
+// It is armed again for the duration of an interval body, so a body that
+// re-reads a rotating credential can call it on every tick — SET VARIABLE is
+// scoped to a connection, so a value captured at boot does not reach one. In
+// direct mode the source is the client's own database, so bodies get no window:
+// Open passes no getenvUDF to the interval registrar there.
 type getenvUDF struct {
 	mu    sync.Mutex
 	armed bool
+	// Non-zero while an interval body runs, which may overlap between tasks.
+	bodies int
 }
 
 func (u *getenvUDF) setArmed(armed bool) {
@@ -40,16 +47,28 @@ func (u *getenvUDF) setArmed(armed bool) {
 	u.armed = armed
 }
 
+func (u *getenvUDF) enterBody() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.bodies++
+}
+
+func (u *getenvUDF) exitBody() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.bodies--
+}
+
 func (u *getenvUDF) Config() duckdb.ScalarFuncConfig { return varcharToVarchar() }
 
 func (u *getenvUDF) Executor() duckdb.ScalarFuncExecutor {
 	return duckdb.ScalarFuncExecutor{
 		RowExecutor: func(values []driver.Value) (any, error) {
 			u.mu.Lock()
-			armed := u.armed
+			armed := u.armed || u.bodies > 0
 			u.mu.Unlock()
 			if !armed {
-				return nil, errors.New("getenv is only available in -f boot SQL")
+				return nil, errors.New("getenv is only available in -f boot SQL and n6kd_set_interval bodies")
 			}
 			name, _ := values[0].(string)
 			value, ok := os.LookupEnv(name)

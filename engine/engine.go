@@ -107,6 +107,9 @@ type Engine struct {
 	catalogs []string
 	log      *zap.SugaredLogger
 
+	// Each holds the connection its body runs on, released by Close.
+	tasks []*intervalTask
+
 	// Closed to stop the n6kd_set_interval tickers; nil when none registered.
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -125,7 +128,7 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 		return nil, err
 	}
 
-	intervals := &setIntervalUDF{armed: true}
+	intervals := &setIntervalUDF{log: log}
 	env := &getenvUDF{}
 	for name, udf := range map[string]duckdb.ScalarFunc{
 		setIntervalFunctionName: intervals,
@@ -137,44 +140,43 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 		}
 	}
 
+	// Armed before the first boot statement: an n6kd_set_interval body runs
+	// inline, while the statement that called it still holds its own connection.
+	// Bodies may read the environment only where the source is not served to
+	// clients, which is every mode but direct.
+	bodyEnv := env
+	if opts.Perms == nil {
+		bodyEnv = nil
+	}
+	if err := intervals.arm(ctx, source, bodyEnv); err != nil {
+		return nil, errors.Join(err, source.Close())
+	}
+
 	started := time.Now()
-	for i, step := range opts.Boot {
-		text, label := step.SQL, fmt.Sprintf("-c #%d", i+1)
-		if step.Path != "" {
-			// #nosec G304 -- the operator names this file on the command line.
-			raw, err := os.ReadFile(step.Path)
-			if err != nil {
-				return nil, errors.Join(err, source.Close())
-			}
-			text, label = string(raw), step.Path
-		}
-		env.setArmed(step.Path != "")
-		if _, err := source.ExecContext(ctx, text); err != nil {
-			return nil, errors.Join(fmt.Errorf("%s: %w", label, err), source.Close())
-		}
-		log.Infof("ran %s (%d bytes)", label, len(text))
+	if err := runBootSQL(ctx, source, opts.Boot, env, intervals, log); err != nil {
+		return nil, errors.Join(err, closeAfterFailedBoot(intervals), source.Close())
 	}
 	log.Infof("boot SQL finished in %v", time.Since(started).Round(time.Millisecond))
 
 	engine := &Engine{source: source, opts: opts, log: log}
 	env.setArmed(false)
-	tasks := intervals.disarm()
-	if err := engine.runIntervalTasksOnce(ctx, tasks); err != nil {
+	tasks, err := intervals.disarm()
+	if err != nil {
 		return nil, errors.Join(err, source.Close())
 	}
 
 	if opts.Perms == nil {
 		if opts.APIKey != "" {
 			if err := registerAuthorizeUDF(ctx, source, opts.APIKey); err != nil {
-				return nil, errors.Join(err, source.Close())
+				return nil, errors.Join(err, closeTasks(tasks), source.Close())
 			}
 		}
 		if err := engine.collectSourceCatalogs(ctx); err != nil {
-			return nil, errors.Join(err, source.Close())
+			return nil, errors.Join(err, closeTasks(tasks), source.Close())
 		}
 		if opts.Lockdown {
 			if err := applyLockdown(ctx, source); err != nil {
-				return nil, errors.Join(err, source.Close())
+				return nil, errors.Join(err, closeTasks(tasks), source.Close())
 			}
 		}
 		engine.startIntervalTasks(tasks)
@@ -182,7 +184,7 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 	}
 	engine.catalogs = slices.Sorted(maps.Keys(opts.Perms.Catalogs))
 	if err := engine.verifyPermsAgainstSource(ctx); err != nil {
-		return nil, errors.Join(err, source.Close())
+		return nil, errors.Join(err, closeTasks(tasks), source.Close())
 	}
 	engine.startIntervalTasks(tasks)
 	return engine, nil
@@ -227,7 +229,7 @@ func (e *Engine) Close() error {
 		close(e.done)
 		e.wg.Wait()
 	}
-	return e.source.Close()
+	return errors.Join(e.closeIntervalTasks(), e.source.Close())
 }
 
 // verifyPermsAgainstSource runs every check the bridge would otherwise run per session
