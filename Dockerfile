@@ -49,7 +49,9 @@ FROM debian:bookworm-slim
 COPY --from=build /etc/passwd /etc/passwd
 COPY --from=build /etc/group /etc/group
 COPY --from=build /out/n6kd /usr/local/bin/n6kd
-COPY --from=build /opt/n6k/extensions /opt/n6k/extensions
+# Owned by the runtime user: a child image's boot SQL may INSTALL further
+# extensions (iceberg, httpfs, ...) into this same directory.
+COPY --from=build --chown=10001:10001 /opt/n6k/extensions /opt/n6k/extensions
 
 RUN mkdir -p /app && chown n6k:n6k /app
 
