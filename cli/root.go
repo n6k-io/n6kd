@@ -95,10 +95,7 @@ func newRootCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				log.Infof("loaded perms %s (source %s, %s)",
-					permsPath,
-					rules.Source.Catalog+"."+rules.Source.Schema,
-					plural(len(rules.Catalogs), "catalog"))
+				log.Infof("loaded perms %s (%s)", permsPath, plural(len(rules.Catalogs), "catalog"))
 			}
 
 			if lockdown {

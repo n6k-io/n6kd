@@ -238,64 +238,74 @@ func (e *Engine) Close() error {
 // rather than an error on every client that connects. It also logs each
 // resolved table and its access.
 func (e *Engine) verifyPermsAgainstSource(ctx context.Context) error {
-	source := e.opts.Perms.Source.Catalog + "." + e.opts.Perms.Source.Schema
 	total, writable := 0, 0
 
 	for _, name := range slices.Sorted(maps.Keys(e.opts.Perms.Catalogs)) {
 		catalog := e.opts.Perms.Catalogs[name]
-		tables := slices.Sorted(maps.Keys(catalog.Tables))
-		e.log.Infof("catalog %q serves %s from %s", name, plural(len(tables), "table"), source)
+		e.log.Infof("catalog %q serves %s", name, plural(countTables(catalog), "table"))
 
 		// Aligned on the name as printed, so the access column lines up.
 		width := 0
-		for _, table := range tables {
-			width = max(width, len(qualify(name, catalog.Schema, table)))
+		for schemaName, schema := range catalog.Schemas {
+			for table := range schema.Tables {
+				width = max(width, len(qualify(name, schemaName, table)))
+			}
 		}
 
-		for _, table := range tables {
-			if err := e.requireSourceTable(ctx, name, table); err != nil {
-				return err
-			}
-			total++
+		for _, schemaName := range slices.Sorted(maps.Keys(catalog.Schemas)) {
+			schema := catalog.Schemas[schemaName]
+			for _, table := range slices.Sorted(maps.Keys(schema.Tables)) {
+				if err := e.requireSourceTable(ctx, name, schemaName, table); err != nil {
+					return err
+				}
+				total++
 
-			if catalog.Tables[table] != perms.ReadWrite {
-				e.log.Infof("  %-*s  read", width, qualify(name, catalog.Schema, table))
-				continue
+				if schema.Tables[table] != perms.ReadWrite {
+					e.log.Infof("  %-*s  read", width, qualify(name, schemaName, table))
+					continue
+				}
+				writable++
+				key, origin, err := e.resolvePrimaryKey(ctx, name, schemaName, table, schema.PrimaryKeys[table])
+				if err != nil {
+					return err
+				}
+				e.log.Infof("  %-*s  readwrite, primary key %s (from %s)",
+					width, qualify(name, schemaName, table), strings.Join(key, ", "), origin)
 			}
-			writable++
-			key, origin, err := e.resolvePrimaryKey(ctx, name, table, catalog.PrimaryKeys[table])
-			if err != nil {
-				return err
-			}
-			e.log.Infof("  %-*s  readwrite, primary key %s (from %s)",
-				width, qualify(name, catalog.Schema, table), strings.Join(key, ", "), origin)
 		}
 	}
 
 	if writable == 0 {
-		e.log.Infof("perms check passed: %s found in %s, none writable", plural(total, "table"), source)
+		e.log.Infof("perms check passed: %s found, none writable", plural(total, "table"))
 		return nil
 	}
-	e.log.Infof("perms check passed: %s found in %s, %s with a usable primary key",
-		plural(total, "table"), source, plural(writable, "writable table"))
+	e.log.Infof("perms check passed: %s found, %s with a usable primary key",
+		plural(total, "table"), plural(writable, "writable table"))
 	return nil
+}
+
+func countTables(catalog perms.Catalog) int {
+	n := 0
+	for _, schema := range catalog.Schemas {
+		n += len(schema.Tables)
+	}
+	return n
 }
 
 // requireSourceTable catches a table perms.yml names but the schema file never
 // created.
-func (e *Engine) requireSourceTable(ctx context.Context, catalog, table string) error {
+func (e *Engine) requireSourceTable(ctx context.Context, catalog, schema, table string) error {
 	var found int
 	err := e.source.QueryRowContext(ctx,
 		`SELECT count(*) FROM duckdb_tables()
 		 WHERE database_name = ? AND schema_name = ? AND table_name = ?`,
-		e.opts.Perms.Source.Catalog, e.opts.Perms.Source.Schema, table,
+		catalog, schema, table,
 	).Scan(&found)
 	if err != nil {
 		return err
 	}
 	if found == 0 {
-		return fmt.Errorf("catalog %q: table %q is not in %s.%s",
-			catalog, table, e.opts.Perms.Source.Catalog, e.opts.Perms.Source.Schema)
+		return fmt.Errorf("expose names %s, which the boot SQL did not create", qualify(catalog, schema, table))
 	}
 	return nil
 }
@@ -304,7 +314,7 @@ func (e *Engine) requireSourceTable(ctx context.Context, catalog, table string) 
 // table: take the perms.yml override if there is one, otherwise discover the
 // declared key, and refuse the table if neither yields columns. The override is
 // additionally checked against duckdb_columns().
-func (e *Engine) resolvePrimaryKey(ctx context.Context, catalog, table string, override []string) ([]string, string, error) {
+func (e *Engine) resolvePrimaryKey(ctx context.Context, catalog, schema, table string, override []string) ([]string, string, error) {
 	if len(override) > 0 {
 		for _, column := range override {
 			var found int
@@ -312,14 +322,14 @@ func (e *Engine) resolvePrimaryKey(ctx context.Context, catalog, table string, o
 				`SELECT count(*) FROM duckdb_columns()
 				 WHERE database_name = ? AND schema_name = ? AND table_name = ?
 				   AND lower(column_name) = lower(?)`,
-				e.opts.Perms.Source.Catalog, e.opts.Perms.Source.Schema, table, column,
+				catalog, schema, table, column,
 			).Scan(&found)
 			if err != nil {
 				return nil, "", err
 			}
 			if found == 0 {
-				return nil, "", fmt.Errorf("catalog %q: primary_keys for %q names column %q, which %s.%s.%s does not have",
-					catalog, table, column, e.opts.Perms.Source.Catalog, e.opts.Perms.Source.Schema, table)
+				return nil, "", fmt.Errorf("keys for %s names column %q, which that table does not have",
+					qualify(catalog, schema, table), column)
 			}
 		}
 		return override, "perms.yml", nil
@@ -330,11 +340,11 @@ func (e *Engine) resolvePrimaryKey(ctx context.Context, catalog, table string, o
 		`SELECT array_to_string(constraint_column_names, ',') FROM duckdb_constraints()
 		 WHERE database_name = ? AND schema_name = ? AND table_name = ?
 		   AND constraint_type = 'PRIMARY KEY'`,
-		e.opts.Perms.Source.Catalog, e.opts.Perms.Source.Schema, table,
+		catalog, schema, table,
 	).Scan(&columns)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && columns.String == "") {
-		return nil, "", fmt.Errorf("catalog %q: table %q is readwrite but has no primary key; declare one in the schema or add a primary_keys override",
-			catalog, table)
+		return nil, "", fmt.Errorf("%s is readwrite but has no primary key; declare one in the schema or add a keys override",
+			qualify(catalog, schema, table))
 	}
 	if err != nil {
 		return nil, "", err

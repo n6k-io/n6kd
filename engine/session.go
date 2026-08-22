@@ -53,7 +53,7 @@ func (e *Engine) NewSession(ctx context.Context, log *zap.SugaredLogger) (*Sessi
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(e.opts.Perms.Catalogs)) {
-		if err := e.attachBridge(ctx, db, name, e.opts.Perms.Catalogs[name]); err != nil {
+		if err := e.attachCatalog(ctx, db, name, e.opts.Perms.Catalogs[name]); err != nil {
 			return nil, errors.Join(fmt.Errorf("catalog %q: %w", name, err), db.Close())
 		}
 		log.Debugf("bridged catalog %q for this client", name)
@@ -68,9 +68,25 @@ func (e *Engine) NewSession(ctx context.Context, log *zap.SugaredLogger) (*Sessi
 	return &Session{db: db}, nil
 }
 
-// attachBridge runs the two-sided handshake: the source registers the tables and
+// attachCatalog attaches the catalog once and bridges each of its schemas into
+// it. vcat_register_source takes a single source catalog.schema and bare table
+// names, so a schema is the unit a bridge covers.
+func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, catalog perms.Catalog) error {
+	if _, err := db.ExecContext(ctx,
+		fmt.Sprintf("ATTACH ':memory:' AS %s (TYPE virtual_catalog)", quoteIdent(name))); err != nil {
+		return err
+	}
+	for _, schemaName := range slices.Sorted(maps.Keys(catalog.Schemas)) {
+		if err := e.bridgeSchema(ctx, db, name, schemaName, catalog.Schemas[schemaName]); err != nil {
+			return fmt.Errorf("schema %q: %w", schemaName, err)
+		}
+	}
+	return nil
+}
+
+// bridgeSchema runs the two-sided handshake: the source registers the tables and
 // primary keys it exposes and returns a token, the target redeems it.
-func (e *Engine) attachBridge(ctx context.Context, db *sql.DB, name string, catalog perms.Catalog) error {
+func (e *Engine) bridgeSchema(ctx context.Context, db *sql.DB, catalog, schemaName string, schema perms.Schema) error {
 	bridgeID, err := newBridgeID()
 	if err != nil {
 		return err
@@ -79,28 +95,23 @@ func (e *Engine) attachBridge(ctx context.Context, db *sql.DB, name string, cata
 	var token string
 	err = e.source.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT vcat_register_source(?, ?, ?, %s, %s)",
-			mapLiteral(catalog.Tables), mapLiteral(primaryKeyMap(catalog.PrimaryKeys))),
-		bridgeID, e.opts.Perms.Source.Catalog, e.opts.Perms.Source.Schema,
+			mapLiteral(schema.Tables), mapLiteral(primaryKeyMap(schema.PrimaryKeys))),
+		bridgeID, catalog, schemaName,
 	).Scan(&token)
 	if err != nil {
 		return fmt.Errorf("register source: %w", err)
 	}
 
-	stmts := []string{
-		fmt.Sprintf("ATTACH ':memory:' AS %s (TYPE virtual_catalog)", quoteIdent(name)),
-		// The bridge requires the target schema to exist before it is set up.
-		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.%s", quoteIdent(name), quoteIdent(catalog.Schema)),
-	}
-	for _, stmt := range stmts {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
+	// The bridge requires the target schema to exist before it is set up.
+	if _, err := db.ExecContext(ctx,
+		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.%s", quoteIdent(catalog), quoteIdent(schemaName))); err != nil {
+		return err
 	}
 
 	var status string
 	err = db.QueryRowContext(ctx,
 		"SELECT vcat_setup_bridge(?, ?, ?, ?)",
-		bridgeID, token, name, catalog.Schema,
+		bridgeID, token, catalog, schemaName,
 	).Scan(&status)
 	if err != nil {
 		return fmt.Errorf("setup bridge: %w", err)

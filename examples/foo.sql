@@ -1,5 +1,7 @@
-CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR);
-INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace');
+ATTACH ':memory:' AS app;
 
-CREATE TABLE audit_log (id INTEGER PRIMARY KEY, action VARCHAR);
-INSERT INTO audit_log VALUES (1, 'login');
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);
+INSERT INTO app.main.users VALUES (1, 'Ada'), (2, 'Grace');
+
+CREATE TABLE app.main.audit_log (id INTEGER PRIMARY KEY, action VARCHAR);
+INSERT INTO app.main.audit_log VALUES (1, 'login');

@@ -23,6 +23,15 @@ CREATE TABLE audit_log (id INTEGER PRIMARY KEY, action VARCHAR);
 INSERT INTO audit_log VALUES (1, 'login');
 `
 
+// Bridged mode needs a catalog of its own: memory cannot be served.
+const bridgedSchemaSQL = `
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);
+INSERT INTO app.main.users VALUES (1, 'Ada'), (2, 'Grace');
+CREATE TABLE app.main.audit_log (id INTEGER PRIMARY KEY, action VARCHAR);
+INSERT INTO app.main.audit_log VALUES (1, 'login');
+`
+
 const permsYAML = `
 expose:
   app.users: readwrite
@@ -42,7 +51,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	dir := t.TempDir()
 	schemaPath := filepath.Join(dir, "schema.sql")
 	permsPath := filepath.Join(dir, "perms.yml")
-	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
+	if err := os.WriteFile(schemaPath, []byte(bridgedSchemaSQL), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(permsPath, []byte(permsYAML), 0o600); err != nil {
@@ -127,7 +136,7 @@ func newAuthTestServer(t *testing.T, apiKey string) *httptest.Server {
 	dir := t.TempDir()
 	schemaPath := filepath.Join(dir, "schema.sql")
 	permsPath := filepath.Join(dir, "perms.yml")
-	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
+	if err := os.WriteFile(schemaPath, []byte(bridgedSchemaSQL), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(permsPath, []byte(permsYAML), 0o600); err != nil {
@@ -260,7 +269,7 @@ func TestLockdownBlocksClientFileAccessOverWebSocket(t *testing.T) {
 	schemaPath := filepath.Join(dir, "schema.sql")
 	permsPath := filepath.Join(dir, "perms.yml")
 	secret := filepath.Join(dir, "secret.csv")
-	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
+	if err := os.WriteFile(schemaPath, []byte(bridgedSchemaSQL), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(permsPath, []byte(permsYAML), 0o600); err != nil {
