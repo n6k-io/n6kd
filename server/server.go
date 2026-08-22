@@ -20,9 +20,7 @@ import (
 const shutdownGrace = 10 * time.Second
 
 type Config struct {
-	Addr       string
-	SchemaPath string
-	PermsPath  string
+	Addr string
 }
 
 func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLogger) error {
