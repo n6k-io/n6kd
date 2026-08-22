@@ -12,9 +12,9 @@ import (
 	"github.com/n6k-io/n6kd/perms"
 )
 
-const tickSchemaSQL = schemaSQL + `
+const tickSchemaSQL = bridgedSchemaSQL + `
 SELECT n6kd_set_interval('tick', INTERVAL 1 SECOND,
-	'INSERT INTO users SELECT max(id) + 1, ''tick'' FROM users');
+	'INSERT INTO app.main.users SELECT max(id) + 1, ''tick'' FROM app.main.users');
 `
 
 func openBoot(t *testing.T, boot []engine.Step, rules *perms.File) (*engine.Engine, error) {
@@ -158,10 +158,10 @@ func TestSetIntervalBodyCannotRegisterAnother(t *testing.T) {
 func TestSetIntervalBodyRefreshesVariableFromEnv(t *testing.T) {
 	t.Setenv("N6KD_TEST_TOKEN", "tok-1")
 
-	eng, err := openBoot(t, []engine.Step{{SQL: schemaSQL + `
+	eng, err := openBoot(t, []engine.Step{{SQL: bridgedSchemaSQL + `
 		SELECT n6kd_set_interval('refresh', INTERVAL 1 SECOND, '
 			SET VARIABLE tok = getenv(''N6KD_TEST_TOKEN'');
-			INSERT INTO users SELECT max(id) + 1, getvariable(''tok'') FROM users;
+			INSERT INTO app.main.users SELECT max(id) + 1, getvariable(''tok'') FROM app.main.users;
 		');
 	`}}, loadPermsYAML(t))
 	if err != nil {

@@ -1,13 +1,12 @@
-# Each key is catalog.table — the catalog part is what a client ATTACHes.
+# Each key names a table as the server has it: catalog.table (schema defaults to
+# main) or catalog.schema.table. It is served under that same name, so a client
+# reaches it as <alias>.main.users after
+# ATTACH 'n6k://host' AS <alias> (TYPE n6k, CATALOG 'app').
 # This is the complete list: an unlisted table does not exist for clients.
 expose:
-  app.users: readwrite
-  app.audit_log: read
-
-# Where foo.sql's tables landed. A bare CREATE TABLE goes to memory.main,
-# which is the default — shown here only for completeness.
-source: memory.main
+  app.main.users: readwrite
+  app.main.audit_log: read
 
 # Only needed where the bridge cannot discover the primary key itself.
 keys:
-  app.users: [id]
+  app.main.users: [id]

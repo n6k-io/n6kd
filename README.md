@@ -43,13 +43,24 @@ expose:
   app.users: readwrite
   app.audit_log: read
 
-source: memory.main
-
 keys:
   app.users: [id]
 ```
 
-An unlisted table does not exist for clients.
+Each key names a table as the server has it — `catalog.table` (schema defaults
+to `main`) or `catalog.schema.table` — and it is served under that same name:
+
+```sql
+ATTACH 'n6k://localhost:8080' AS eggs (TYPE n6k, CATALOG 'app');
+SELECT * FROM eggs.main.users;
+```
+
+The alias is the client's to pick; `CATALOG` selects the served catalog. An
+unlisted table does not exist for clients.
+
+`memory`, `system`, and `temp` cannot be exposed — every DuckDB already has
+them, so a served catalog cannot take those names. Boot SQL must `ATTACH` a
+catalog of its own rather than relying on the default.
 
 ## SQL functions
 

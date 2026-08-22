@@ -21,8 +21,16 @@ CREATE TABLE audit_log (id INTEGER PRIMARY KEY, action VARCHAR);
 INSERT INTO audit_log VALUES (1, 'login');
 `
 
+// Bridged mode needs a catalog of its own: memory cannot be served.
+const bridgedSchemaSQL = `
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);
+INSERT INTO app.main.users VALUES (1, 'Ada'), (2, 'Grace');
+CREATE TABLE app.main.audit_log (id INTEGER PRIMARY KEY, action VARCHAR);
+INSERT INTO app.main.audit_log VALUES (1, 'login');
+`
+
 const permsYAML = `
-source: memory.main
 expose:
   app.users: readwrite
   app.audit_log: read
@@ -41,7 +49,7 @@ func open(t *testing.T) *engine.Engine {
 	dir := t.TempDir()
 	schemaPath := filepath.Join(dir, "schema.sql")
 	permsPath := filepath.Join(dir, "perms.yml")
-	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
+	if err := os.WriteFile(schemaPath, []byte(bridgedSchemaSQL), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(permsPath, []byte(permsYAML), 0o600); err != nil {
@@ -209,7 +217,7 @@ func TestLockdownBlocksFileAccessInBridgedSession(t *testing.T) {
 	dir := t.TempDir()
 	schemaPath := filepath.Join(dir, "schema.sql")
 	permsPath := filepath.Join(dir, "perms.yml")
-	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
+	if err := os.WriteFile(schemaPath, []byte(bridgedSchemaSQL), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(permsPath, []byte(permsYAML), 0o600); err != nil {
@@ -331,13 +339,13 @@ func openFails(t *testing.T, schema, permsYML string) error {
 
 func TestMissingTableFailsAtStartup(t *testing.T) {
 	// The schema omits audit_log, which perms.yml still names.
-	err := openFails(t, "CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR);", permsYAML)
+	err := openFails(t, "ATTACH ':memory:' AS app;\nCREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);", permsYAML)
 	t.Logf("refused as expected: %v", err)
 }
 
 // resolvePrimaryKey refuses a readwrite table with no key, so Open fails.
 func TestWritableTableWithoutPrimaryKeyFailsAtStartup(t *testing.T) {
-	const schema = `CREATE TABLE events (id INTEGER, action VARCHAR);`
+	const schema = `ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`
 	const rules = `
 expose:
   app.events: readwrite
@@ -349,7 +357,7 @@ expose:
 }
 
 func TestPrimaryKeyOverrideWithUnknownColumnFailsAtStartup(t *testing.T) {
-	const schema = `CREATE TABLE events (id INTEGER, action VARCHAR);`
+	const schema = `ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`
 	const rules = `
 expose:
   app.events: readwrite
@@ -372,7 +380,7 @@ func TestDiscoveredPrimaryKeyNeedsNoOverride(t *testing.T) {
 	schemaPath := filepath.Join(dir, "schema.sql")
 	permsPath := filepath.Join(dir, "perms.yml")
 	if err := os.WriteFile(schemaPath,
-		[]byte("CREATE TABLE events (id INTEGER PRIMARY KEY, action VARCHAR);"), 0o600); err != nil {
+		[]byte("ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER PRIMARY KEY, action VARCHAR);"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(permsPath, []byte(`

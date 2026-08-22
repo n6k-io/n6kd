@@ -44,7 +44,12 @@ RUN N6K_EXTENSION_HOME=/opt/n6k/extensions /out/n6kd install
 RUN echo 'n6k:x:10001:10001::/app:/usr/sbin/nologin' >> /etc/passwd \
     && echo 'n6k:x:10001:' >> /etc/group
 
+FROM debian:bookworm-slim AS certs
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
+
 FROM debian:bookworm-slim
+
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 COPY --from=build /etc/passwd /etc/passwd
 COPY --from=build /etc/group /etc/group
