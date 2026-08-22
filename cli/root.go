@@ -32,6 +32,7 @@ func newRootCmd() *cobra.Command {
 	var apiKey string
 	var lockdown, noLockdown bool
 	var debug, jsonLogs bool
+	var bootOnly bool
 
 	var boot []engine.Step
 
@@ -124,6 +125,11 @@ func newRootCmd() *cobra.Command {
 			defer func() { err = errors.Join(err, eng.Close()) }()
 			log.Infof("startup finished in %v", time.Since(started).Round(time.Millisecond))
 
+			if bootOnly {
+				log.Infof("--boot-only: boot SQL ran, not serving")
+				return nil
+			}
+
 			return server.Run(cmd.Context(), cfg, eng, log)
 		},
 	}
@@ -141,6 +147,8 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&lockdown, "lockdown", os.Getenv("N6KD_NO_LOCKDOWN") == "",
 		"take the local filesystem and extension installation away from served connections")
 	cmd.Flags().BoolVar(&noLockdown, "no-lockdown", false, "the inverse of --lockdown")
+	cmd.Flags().BoolVar(&bootOnly, "boot-only", false,
+		"run the -f files and -c statements, then exit without binding the listener")
 	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-connection and per-catalog detail")
 	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
 		"log JSON lines with Cloud Logging severity fields, for log collectors")
