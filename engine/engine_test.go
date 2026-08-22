@@ -52,7 +52,7 @@ func open(t *testing.T) *engine.Engine {
 	if err != nil {
 		t.Fatalf("load perms: %v", err)
 	}
-	eng, err := engine.Open(t.Context(), engine.Options{SchemaPath: schemaPath, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	eng, err := engine.Open(t.Context(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, zaptest.NewLogger(t).Sugar())
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}
@@ -144,7 +144,7 @@ func openDirect(t *testing.T) *engine.Engine {
 	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := engine.Open(t.Context(), engine.Options{SchemaPath: schemaPath}, zaptest.NewLogger(t).Sugar())
+	eng, err := engine.Open(t.Context(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}}, zaptest.NewLogger(t).Sugar())
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestLockdownBlocksFileAccessInBridgedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	eng, err := engine.Open(t.Context(),
-		engine.Options{SchemaPath: schemaPath, Perms: rules, Lockdown: true}, zaptest.NewLogger(t).Sugar())
+		engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, Lockdown: true}, zaptest.NewLogger(t).Sugar())
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestLockdownBlocksFileAccessInDirectMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	eng, err := engine.Open(t.Context(),
-		engine.Options{SchemaPath: schemaPath, Lockdown: true}, zaptest.NewLogger(t).Sugar())
+		engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Lockdown: true}, zaptest.NewLogger(t).Sugar())
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}
@@ -321,7 +321,7 @@ func openFails(t *testing.T, schema, permsYML string) error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng, err := engine.Open(context.Background(), engine.Options{SchemaPath: schemaPath, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	eng, err := engine.Open(context.Background(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, zaptest.NewLogger(t).Sugar())
 	if err == nil {
 		_ = eng.Close()
 		t.Fatal("engine opened despite an invalid configuration")
@@ -386,7 +386,7 @@ expose:
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng, err := engine.Open(t.Context(), engine.Options{SchemaPath: schemaPath, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	eng, err := engine.Open(t.Context(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, zaptest.NewLogger(t).Sugar())
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}

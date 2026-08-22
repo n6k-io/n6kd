@@ -17,9 +17,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
-	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/duckdb/duckdb-go/v2"
 	"go.uber.org/zap"
 
 	"github.com/n6k-io/n6kd/perms"
@@ -81,8 +82,16 @@ func extensionDSN() string {
 	return dsn
 }
 
+// Step is one unit of boot SQL: a file (-f) or inline statements (-c).
+// Exactly one field is set.
+type Step struct {
+	Path string
+	SQL  string
+}
+
 type Options struct {
-	SchemaPath string
+	// Run into the source database in order, before anything is served.
+	Boot []Step
 	// nil means no perms.yml: sessions share the source directly, unbridged.
 	Perms *perms.File
 	// Empty means no authentication; otherwise clients must present this token.
@@ -97,17 +106,15 @@ type Engine struct {
 	opts     Options
 	catalogs []string
 	log      *zap.SugaredLogger
+
+	// Closed to stop the n6kd_set_interval tickers; nil when none registered.
+	done chan struct{}
+	wg   sync.WaitGroup
 }
 
-// Open builds the source database and runs opts.SchemaPath into it. Any error
-// it returns aborts boot before the listener is created.
+// Open builds the source database and runs opts.Boot into it in order. Any
+// error it returns aborts boot before the listener is created.
 func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, error) {
-	// #nosec G304 -- the operator names this file on the command line.
-	schema, err := os.ReadFile(opts.SchemaPath)
-	if err != nil {
-		return nil, err
-	}
-
 	// Direct mode serves the socket from this database, not from a session's.
 	extensions := sourceExtensions
 	if opts.Perms == nil {
@@ -118,14 +125,44 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 		return nil, err
 	}
 
-	started := time.Now()
-	if _, err := source.ExecContext(ctx, string(schema)); err != nil {
-		return nil, errors.Join(fmt.Errorf("%s: %w", opts.SchemaPath, err), source.Close())
+	intervals := &setIntervalUDF{armed: true}
+	env := &getenvUDF{}
+	for name, udf := range map[string]duckdb.ScalarFunc{
+		setIntervalFunctionName: intervals,
+		"getenv":                env,
+		"n6kd_log":              &logUDF{log: log},
+	} {
+		if err := registerScalarUDF(ctx, source, name, udf); err != nil {
+			return nil, errors.Join(err, source.Close())
+		}
 	}
-	log.Infof("loaded schema %s (%d bytes) in %v",
-		opts.SchemaPath, len(schema), time.Since(started).Round(time.Millisecond))
+
+	started := time.Now()
+	for i, step := range opts.Boot {
+		text, label := step.SQL, fmt.Sprintf("-c #%d", i+1)
+		if step.Path != "" {
+			// #nosec G304 -- the operator names this file on the command line.
+			raw, err := os.ReadFile(step.Path)
+			if err != nil {
+				return nil, errors.Join(err, source.Close())
+			}
+			text, label = string(raw), step.Path
+		}
+		env.setArmed(step.Path != "")
+		if _, err := source.ExecContext(ctx, text); err != nil {
+			return nil, errors.Join(fmt.Errorf("%s: %w", label, err), source.Close())
+		}
+		log.Infof("ran %s (%d bytes)", label, len(text))
+	}
+	log.Infof("boot SQL finished in %v", time.Since(started).Round(time.Millisecond))
 
 	engine := &Engine{source: source, opts: opts, log: log}
+	env.setArmed(false)
+	tasks := intervals.disarm()
+	if err := engine.runIntervalTasksOnce(ctx, tasks); err != nil {
+		return nil, errors.Join(err, source.Close())
+	}
+
 	if opts.Perms == nil {
 		if opts.APIKey != "" {
 			if err := registerAuthorizeUDF(ctx, source, opts.APIKey); err != nil {
@@ -140,12 +177,14 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 				return nil, errors.Join(err, source.Close())
 			}
 		}
+		engine.startIntervalTasks(tasks)
 		return engine, nil
 	}
 	engine.catalogs = slices.Sorted(maps.Keys(opts.Perms.Catalogs))
 	if err := engine.verifyPermsAgainstSource(ctx); err != nil {
 		return nil, errors.Join(err, source.Close())
 	}
+	engine.startIntervalTasks(tasks)
 	return engine, nil
 }
 
@@ -184,6 +223,10 @@ func (e *Engine) collectSourceCatalogs(ctx context.Context) error {
 }
 
 func (e *Engine) Close() error {
+	if e.done != nil {
+		close(e.done)
+		e.wg.Wait()
+	}
 	return e.source.Close()
 }
 

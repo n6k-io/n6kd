@@ -54,7 +54,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	log := zaptest.NewLogger(t).Sugar()
-	eng, err := engine.Open(t.Context(), engine.Options{SchemaPath: schemaPath, Perms: rules}, log)
+	eng, err := engine.Open(t.Context(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, log)
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}
@@ -85,7 +85,7 @@ func newDirectTestServerWithKey(t *testing.T, apiKey string) *httptest.Server {
 	}
 	log := zaptest.NewLogger(t).Sugar()
 	eng, err := engine.Open(t.Context(),
-		engine.Options{SchemaPath: schemaPath, APIKey: apiKey}, log)
+		engine.Options{Boot: []engine.Step{{Path: schemaPath}}, APIKey: apiKey}, log)
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}
@@ -140,7 +140,7 @@ func newAuthTestServer(t *testing.T, apiKey string) *httptest.Server {
 	}
 	log := zaptest.NewLogger(t).Sugar()
 	eng, err := engine.Open(t.Context(),
-		engine.Options{SchemaPath: schemaPath, Perms: rules, APIKey: apiKey}, log)
+		engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, APIKey: apiKey}, log)
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestLockdownBlocksClientFileAccessOverWebSocket(t *testing.T) {
 	}
 	log := zaptest.NewLogger(t).Sugar()
 	eng, err := engine.Open(t.Context(),
-		engine.Options{SchemaPath: schemaPath, Perms: rules, Lockdown: true}, log)
+		engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, Lockdown: true}, log)
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}

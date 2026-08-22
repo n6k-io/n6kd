@@ -28,20 +28,21 @@ func Execute() error {
 
 func newRootCmd() *cobra.Command {
 	var cfg server.Config
+	var permsPath string
 	var apiKey string
 	var lockdown, noLockdown bool
-	var debug bool
+	var debug, jsonLogs bool
+
+	var boot []engine.Step
 
 	cmd := &cobra.Command{
-		Use:   "n6kd <schema.sql> [perms.yml]",
+		Use:   "n6kd -f schema.sql [-f file.sql | -c SQL]... [--perms perms.yml]",
 		Short: "Serve DuckDB catalogs over the n6k protocol",
-		Long: "Loads <schema.sql> into a DuckDB database and serves the catalogs named in\n" +
-			"<perms.yml> to WebSocket clients.\n\n" +
-			"Either path may be omitted when N6K_SCHEMA / N6K_PERMS name it instead,\n" +
-			"which is how the container image passes what a child image COPYs in.\n\n" +
+		Long: "Runs the -f files and -c statements, in the order given, into a DuckDB\n" +
+			"database and serves the catalogs named in --perms to WebSocket clients.\n\n" +
 			"With no perms.yml at all, clients are served from the loaded database\n" +
 			"directly: every catalog it holds, read and write, unbridged.",
-		Args: cobra.MaximumNArgs(2),
+		Args: cobra.NoArgs,
 		// Named return so the deferred close can report a failure to flush or
 		// release the database rather than drop it.
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
@@ -56,7 +57,7 @@ func newRootCmd() *cobra.Command {
 				lockdown = false
 			}
 
-			log, err := installLogger(debug)
+			log, err := installLogger(debug, jsonLogs)
 			if err != nil {
 				return err
 			}
@@ -64,15 +65,18 @@ func newRootCmd() *cobra.Command {
 			// failing the run over.
 			defer func() { _ = log.Sync() }()
 
-			cfg.SchemaPath, err = requirePathArg(args, 0, "N6K_SCHEMA", "schema.sql")
-			if err != nil {
-				return err
+			if len(boot) == 0 {
+				return fmt.Errorf("no boot SQL given: pass -f or -c")
 			}
-			cfg.PermsPath = optionalPathArg(args, 1, "N6K_PERMS")
 
-			paths := []string{cfg.SchemaPath}
-			if cfg.PermsPath != "" {
-				paths = append(paths, cfg.PermsPath)
+			var paths []string
+			for _, step := range boot {
+				if step.Path != "" {
+					paths = append(paths, step.Path)
+				}
+			}
+			if permsPath != "" {
+				paths = append(paths, permsPath)
 			}
 			if err := requireExistingFiles(paths...); err != nil {
 				return err
@@ -83,15 +87,15 @@ func newRootCmd() *cobra.Command {
 			started := time.Now()
 
 			var rules *perms.File
-			if cfg.PermsPath == "" {
+			if permsPath == "" {
 				log.Warnf("no perms.yml given: serving the loaded database directly, with no permission layer")
 			} else {
-				rules, err = perms.Load(cfg.PermsPath)
+				rules, err = perms.Load(permsPath)
 				if err != nil {
 					return err
 				}
 				log.Infof("loaded perms %s (source %s, %s)",
-					cfg.PermsPath,
+					permsPath,
 					rules.Source.Catalog+"."+rules.Source.Schema,
 					plural(len(rules.Catalogs), "catalog"))
 			}
@@ -109,10 +113,10 @@ func newRootCmd() *cobra.Command {
 			}
 
 			eng, err := engine.Open(cmd.Context(), engine.Options{
-				SchemaPath: cfg.SchemaPath,
-				Perms:      rules,
-				APIKey:     apiKey,
-				Lockdown:   lockdown,
+				Boot:     boot,
+				Perms:    rules,
+				APIKey:   apiKey,
+				Lockdown: lockdown,
 			}, log)
 			if err != nil {
 				return err
@@ -126,13 +130,20 @@ func newRootCmd() *cobra.Command {
 
 	cmd.AddCommand(newInstallCmd(), newSelfTestCmd())
 
+	cmd.Flags().VarP(&stepFlag{steps: &boot, file: true}, "file", "f",
+		"SQL file run into the source database at boot; repeatable, in order with -c")
+	cmd.Flags().VarP(&stepFlag{steps: &boot}, "command", "c",
+		"SQL run into the source database at boot; repeatable, in order with -f")
+	cmd.Flags().StringVar(&permsPath, "perms", "", "perms.yml naming the catalogs to serve bridged")
 	cmd.Flags().StringVar(&cfg.Addr, "addr", defaultAddr(), "address to listen on")
-	cmd.Flags().StringVar(&apiKey, "api-key", os.Getenv("N6K_API_KEY"),
+	cmd.Flags().StringVar(&apiKey, "api-key", os.Getenv("N6KD_API_KEY"),
 		"token clients must present to connect; without one, anyone who reaches the port is served")
-	cmd.Flags().BoolVar(&lockdown, "lockdown", os.Getenv("N6K_NO_LOCKDOWN") == "",
+	cmd.Flags().BoolVar(&lockdown, "lockdown", os.Getenv("N6KD_NO_LOCKDOWN") == "",
 		"take the local filesystem and extension installation away from served connections")
 	cmd.Flags().BoolVar(&noLockdown, "no-lockdown", false, "the inverse of --lockdown")
-	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6K_DEBUG") != "", "log per-connection and per-catalog detail")
+	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-connection and per-catalog detail")
+	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
+		"log JSON lines with Cloud Logging severity fields, for log collectors")
 	cmd.SetErrPrefix("n6kd:")
 	return cmd
 }
@@ -140,7 +151,7 @@ func newRootCmd() *cobra.Command {
 // newInstallCmd downloads the extensions ahead of any serving. The Dockerfile
 // runs it at build time so the image ships with them already on disk.
 func newInstallCmd() *cobra.Command {
-	var debug bool
+	var debug, jsonLogs bool
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -152,7 +163,7 @@ func newInstallCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 
-			log, err := installLogger(debug)
+			log, err := installLogger(debug, jsonLogs)
 			if err != nil {
 				return err
 			}
@@ -162,14 +173,16 @@ func newInstallCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6K_DEBUG") != "", "log per-extension detail")
+	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-extension detail")
+	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
+		"log JSON lines with Cloud Logging severity fields, for log collectors")
 	return cmd
 }
 
 // newSelfTestCmd exercises the serving path against built-in fixtures. The
 // Dockerfile runs it as the final build step.
 func newSelfTestCmd() *cobra.Command {
-	var debug bool
+	var debug, jsonLogs bool
 
 	cmd := &cobra.Command{
 		Use:   "selftest",
@@ -181,7 +194,7 @@ func newSelfTestCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 
-			log, err := installLogger(debug)
+			log, err := installLogger(debug, jsonLogs)
 			if err != nil {
 				return err
 			}
@@ -195,27 +208,35 @@ func newSelfTestCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6K_DEBUG") != "", "log per-extension and per-catalog detail")
+	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-extension and per-catalog detail")
+	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
+		"log JSON lines with Cloud Logging severity fields, for log collectors")
 	return cmd
 }
 
-// requirePathArg resolves a positional path, falling back to the environment so
-// the container image can supply it without a wrapper script.
-func requirePathArg(args []string, i int, env, name string) (string, error) {
-	if i < len(args) {
-		return args[i], nil
-	}
-	if path := os.Getenv(env); path != "" {
-		return path, nil
-	}
-	return "", fmt.Errorf("no %s given: pass it as argument %d or set %s", name, i+1, env)
+// stepFlag appends to a slice shared between -f and -c, so the boot steps keep
+// the order the flags were given in rather than grouping by flag.
+type stepFlag struct {
+	steps *[]engine.Step
+	file  bool
 }
 
-func optionalPathArg(args []string, i int, env string) string {
-	if i < len(args) {
-		return args[i]
+func (s *stepFlag) Set(v string) error {
+	if s.file {
+		*s.steps = append(*s.steps, engine.Step{Path: v})
+	} else {
+		*s.steps = append(*s.steps, engine.Step{SQL: v})
 	}
-	return os.Getenv(env)
+	return nil
+}
+
+func (s *stepFlag) String() string { return "" }
+
+func (s *stepFlag) Type() string {
+	if s.file {
+		return "file"
+	}
+	return "sql"
 }
 
 // defaultAddr honours PORT, which hosts like Cloud Run set to choose the port.
@@ -234,8 +255,39 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
-func installLogger(debug bool) (*zap.SugaredLogger, error) {
+// gcpSeverity maps zap levels onto Cloud Logging's severity values, which is
+// what makes a JSON line render at the right level in the GCP console.
+func gcpSeverity(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+	switch level {
+	case zapcore.DebugLevel:
+		enc.AppendString("DEBUG")
+	case zapcore.InfoLevel:
+		enc.AppendString("INFO")
+	case zapcore.WarnLevel:
+		enc.AppendString("WARNING")
+	case zapcore.ErrorLevel:
+		enc.AppendString("ERROR")
+	case zapcore.DPanicLevel:
+		enc.AppendString("CRITICAL")
+	case zapcore.PanicLevel:
+		enc.AppendString("ALERT")
+	default:
+		enc.AppendString("EMERGENCY")
+	}
+}
+
+func installLogger(debug, jsonLogs bool) (*zap.SugaredLogger, error) {
 	cfg := zap.NewDevelopmentConfig()
+	if jsonLogs {
+		cfg = zap.NewProductionConfig()
+		// Sampling drops repeats, which is wrong for an operator's log of record.
+		cfg.Sampling = nil
+		cfg.EncoderConfig.TimeKey = "time"
+		cfg.EncoderConfig.EncodeTime = zapcore.RFC3339NanoTimeEncoder
+		cfg.EncoderConfig.LevelKey = "severity"
+		cfg.EncoderConfig.EncodeLevel = gcpSeverity
+		cfg.EncoderConfig.MessageKey = "message"
+	}
 	if debug {
 		cfg.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
 	} else {
@@ -245,7 +297,9 @@ func installLogger(debug bool) (*zap.SugaredLogger, error) {
 	// says where it came from. A stack trace on an error line is the same.
 	cfg.DisableCaller = true
 	cfg.DisableStacktrace = true
-	cfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05.000")
+	if !jsonLogs {
+		cfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05.000")
+	}
 	// stderr for both, so stdout stays free for anything a later subcommand
 	// wants to emit as data.
 	cfg.OutputPaths = []string{"stderr"}

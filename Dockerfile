@@ -1,8 +1,9 @@
 # Build from this directory:
 #   docker build -t n6k/n6kd .
 #
-# A child image adds only data. Without a perms.yml every catalog in schema.sql
-# is served read/write to anyone who connects, so set N6K_API_KEY at run time:
+# A child image adds only data. Without a perms.yml every catalog the boot SQL
+# leaves is served read/write to anyone who connects, so set N6KD_API_KEY at
+# run time:
 #   FROM n6k/n6kd
 #   COPY schema.sql /app/schema.sql
 #
@@ -10,7 +11,7 @@
 #   FROM n6k/n6kd
 #   COPY schema.sql /app/schema.sql
 #   COPY perms.yml  /app/perms.yml
-#   ENV N6K_PERMS=/app/perms.yml
+#   CMD ["-f", "/app/schema.sql", "--perms", "/app/perms.yml"]
 #
 # duckdb-go links prebuilt DuckDB libraries through cgo against glibc, so the
 # runtime is Debian rather than alpine, and there is no cross toolchain here:
@@ -53,10 +54,6 @@ COPY --from=build /opt/n6k/extensions /opt/n6k/extensions
 RUN mkdir -p /app && chown n6k:n6k /app
 
 ENV N6K_EXTENSION_HOME=/opt/n6k/extensions
-ENV N6K_SCHEMA=/app/schema.sql
-# Unset, so the default is every catalog read/write. A child image that ships a
-# perms.yml sets this to it.
-# ENV N6K_PERMS=/app/perms.yml
 ENV PORT=8080
 
 ENV HOME=/app
@@ -71,3 +68,5 @@ EXPOSE 8080
 RUN n6kd selftest
 
 ENTRYPOINT ["/usr/local/bin/n6kd"]
+# A child image that ships a perms.yml overrides CMD to add --perms.
+CMD ["-f", "/app/schema.sql"]

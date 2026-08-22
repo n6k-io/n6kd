@@ -54,7 +54,7 @@ func SelfTest(ctx context.Context, log *zap.SugaredLogger) error {
 		return fmt.Errorf("selftest perms: %w", err)
 	}
 
-	eng, err := Open(ctx, Options{SchemaPath: schemaPath, Perms: rules, Lockdown: true}, log)
+	eng, err := Open(ctx, Options{Boot: []Step{{Path: schemaPath}}, Perms: rules, Lockdown: true}, log)
 	if err != nil {
 		return fmt.Errorf("selftest engine: %w", err)
 	}
