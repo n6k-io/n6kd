@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"database/sql/driver"
-	"fmt"
 
 	"github.com/duckdb/duckdb-go/v2"
 )
@@ -54,14 +53,5 @@ func (a *apiKeyAuth) Executor() duckdb.ScalarFuncExecutor {
 // into the system catalog, so it is visible to every connection on db, not just
 // the one used here.
 func registerAuthorizeUDF(ctx context.Context, db *sql.DB, key string) error {
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-
-	if err := duckdb.RegisterScalarUDF(conn, authFunctionName, &apiKeyAuth{key: key}); err != nil {
-		return fmt.Errorf("register %s: %w", authFunctionName, err)
-	}
-	return nil
+	return registerScalarUDF(ctx, db, authFunctionName, &apiKeyAuth{key: key})
 }

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -88,19 +87,6 @@ func (u *setIntervalUDF) disarm() []intervalTask {
 	defer u.mu.Unlock()
 	u.armed = false
 	return u.tasks
-}
-
-func registerSetIntervalUDF(ctx context.Context, db *sql.DB, udf *setIntervalUDF) error {
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-
-	if err := duckdb.RegisterScalarUDF(conn, setIntervalFunctionName, udf); err != nil {
-		return fmt.Errorf("register %s: %w", setIntervalFunctionName, err)
-	}
-	return nil
 }
 
 // runIntervalTasksOnce executes each body against the source, so a broken body

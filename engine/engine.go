@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/duckdb/duckdb-go/v2"
 	"go.uber.org/zap"
 
 	"github.com/n6k-io/n6kd/perms"
@@ -126,8 +126,15 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 	}
 
 	intervals := &setIntervalUDF{armed: true}
-	if err := registerSetIntervalUDF(ctx, source, intervals); err != nil {
-		return nil, errors.Join(err, source.Close())
+	env := &getenvUDF{}
+	for name, udf := range map[string]duckdb.ScalarFunc{
+		setIntervalFunctionName: intervals,
+		"getenv":                env,
+		"n6kd_log":              &logUDF{log: log},
+	} {
+		if err := registerScalarUDF(ctx, source, name, udf); err != nil {
+			return nil, errors.Join(err, source.Close())
+		}
 	}
 
 	started := time.Now()
@@ -141,6 +148,7 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 			}
 			text, label = string(raw), step.Path
 		}
+		env.setArmed(step.Path != "")
 		if _, err := source.ExecContext(ctx, text); err != nil {
 			return nil, errors.Join(fmt.Errorf("%s: %w", label, err), source.Close())
 		}
@@ -149,6 +157,7 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 	log.Infof("boot SQL finished in %v", time.Since(started).Round(time.Millisecond))
 
 	engine := &Engine{source: source, opts: opts, log: log}
+	env.setArmed(false)
 	tasks := intervals.disarm()
 	if err := engine.runIntervalTasksOnce(ctx, tasks); err != nil {
 		return nil, errors.Join(err, source.Close())

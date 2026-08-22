@@ -31,7 +31,7 @@ func newRootCmd() *cobra.Command {
 	var permsPath string
 	var apiKey string
 	var lockdown, noLockdown bool
-	var debug bool
+	var debug, jsonLogs bool
 
 	var boot []engine.Step
 
@@ -57,7 +57,7 @@ func newRootCmd() *cobra.Command {
 				lockdown = false
 			}
 
-			log, err := installLogger(debug)
+			log, err := installLogger(debug, jsonLogs)
 			if err != nil {
 				return err
 			}
@@ -142,6 +142,8 @@ func newRootCmd() *cobra.Command {
 		"take the local filesystem and extension installation away from served connections")
 	cmd.Flags().BoolVar(&noLockdown, "no-lockdown", false, "the inverse of --lockdown")
 	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-connection and per-catalog detail")
+	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
+		"log JSON lines with Cloud Logging severity fields, for log collectors")
 	cmd.SetErrPrefix("n6kd:")
 	return cmd
 }
@@ -149,7 +151,7 @@ func newRootCmd() *cobra.Command {
 // newInstallCmd downloads the extensions ahead of any serving. The Dockerfile
 // runs it at build time so the image ships with them already on disk.
 func newInstallCmd() *cobra.Command {
-	var debug bool
+	var debug, jsonLogs bool
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -161,7 +163,7 @@ func newInstallCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 
-			log, err := installLogger(debug)
+			log, err := installLogger(debug, jsonLogs)
 			if err != nil {
 				return err
 			}
@@ -172,13 +174,15 @@ func newInstallCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-extension detail")
+	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
+		"log JSON lines with Cloud Logging severity fields, for log collectors")
 	return cmd
 }
 
 // newSelfTestCmd exercises the serving path against built-in fixtures. The
 // Dockerfile runs it as the final build step.
 func newSelfTestCmd() *cobra.Command {
-	var debug bool
+	var debug, jsonLogs bool
 
 	cmd := &cobra.Command{
 		Use:   "selftest",
@@ -190,7 +194,7 @@ func newSelfTestCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 
-			log, err := installLogger(debug)
+			log, err := installLogger(debug, jsonLogs)
 			if err != nil {
 				return err
 			}
@@ -205,6 +209,8 @@ func newSelfTestCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-extension and per-catalog detail")
+	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
+		"log JSON lines with Cloud Logging severity fields, for log collectors")
 	return cmd
 }
 
@@ -249,8 +255,39 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
-func installLogger(debug bool) (*zap.SugaredLogger, error) {
+// gcpSeverity maps zap levels onto Cloud Logging's severity values, which is
+// what makes a JSON line render at the right level in the GCP console.
+func gcpSeverity(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+	switch level {
+	case zapcore.DebugLevel:
+		enc.AppendString("DEBUG")
+	case zapcore.InfoLevel:
+		enc.AppendString("INFO")
+	case zapcore.WarnLevel:
+		enc.AppendString("WARNING")
+	case zapcore.ErrorLevel:
+		enc.AppendString("ERROR")
+	case zapcore.DPanicLevel:
+		enc.AppendString("CRITICAL")
+	case zapcore.PanicLevel:
+		enc.AppendString("ALERT")
+	default:
+		enc.AppendString("EMERGENCY")
+	}
+}
+
+func installLogger(debug, jsonLogs bool) (*zap.SugaredLogger, error) {
 	cfg := zap.NewDevelopmentConfig()
+	if jsonLogs {
+		cfg = zap.NewProductionConfig()
+		// Sampling drops repeats, which is wrong for an operator's log of record.
+		cfg.Sampling = nil
+		cfg.EncoderConfig.TimeKey = "time"
+		cfg.EncoderConfig.EncodeTime = zapcore.RFC3339NanoTimeEncoder
+		cfg.EncoderConfig.LevelKey = "severity"
+		cfg.EncoderConfig.EncodeLevel = gcpSeverity
+		cfg.EncoderConfig.MessageKey = "message"
+	}
 	if debug {
 		cfg.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
 	} else {
@@ -260,7 +297,9 @@ func installLogger(debug bool) (*zap.SugaredLogger, error) {
 	// says where it came from. A stack trace on an error line is the same.
 	cfg.DisableCaller = true
 	cfg.DisableStacktrace = true
-	cfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05.000")
+	if !jsonLogs {
+		cfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05.000")
+	}
 	// stderr for both, so stdout stays free for anything a later subcommand
 	// wants to emit as data.
 	cfg.OutputPaths = []string{"stderr"}
