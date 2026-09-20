@@ -141,7 +141,7 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&permsPath, "perms", "", "perms.yml naming the catalogs to serve bridged")
 	cmd.Flags().StringVar(&cfg.Addr, "addr", defaultAddr(), "address to listen on")
 	cmd.Flags().StringSliceVar(&cfg.AllowedOrigins, "allow-origin", defaultAllowedOrigins(),
-		"origins served the CORS headers browser clients need; repeatable, default any")
+		"browser origins allowed to connect (WebSocket handshake and CORS); repeatable, default any")
 	cmd.Flags().StringVar(&apiKey, "api-key", os.Getenv("N6KD_API_KEY"),
 		"token clients must present to connect; without one, anyone who reaches the port is served")
 	cmd.Flags().BoolVar(&lockdown, "lockdown", os.Getenv("N6KD_NO_LOCKDOWN") == "",

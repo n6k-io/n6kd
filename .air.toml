@@ -6,7 +6,7 @@ tmp_dir = "tmp"
   bin = "./tmp/n6kd"
   # air has no [build] env key, so the environment rides on full_bin. The path is
   # relative to packages/go, which is where air runs (root = ".").
-  full_bin = "N6K_EXTENSION_DIR=../duckdb-driver/build/release/extension:../duckdb-virtual-catalog/build/release/extension./tmp/n6kd -f examples/foo.sql --perms examples/perms.yml --addr :8080"
+  full_bin = "N6K_EXTENSION_DIR=../duckdb-driver/build/release/extension:../duckdb-virtual-catalog/build/release/extension ./tmp/n6kd -f examples/foo.sql --perms examples/perms.yml --addr :8080"
   include_ext = ["go", "sql", "yml", "yaml"]
   exclude_dir = ["tmp", "scratch"]
   exclude_regex = ["_test\\.go"]

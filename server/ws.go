@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -39,16 +40,23 @@ const maxFrameBytes = 1 << 30
 // reactor's own 5s drain of in-flight queries, which this has to outlast.
 const serveJoinTimeout = 15 * time.Second
 
-var upgrader = websocket.Upgrader{
-	// Any origin is accepted: access is decided by perms.yml and the n6k_authorize
-	// handshake, not by the browser's origin header.
-	CheckOrigin: func(*http.Request) bool { return true },
+// Browsers never apply CORS to a WebSocket handshake, so the origin list has to
+// be enforced here. A request without an Origin header is not a browser and is
+// let through; the API key is what authenticates it.
+func newUpgrader(origins []string) *websocket.Upgrader {
+	any := slices.Contains(origins, "*")
+	return &websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			return origin == "" || any || slices.Contains(origins, origin)
+		},
+	}
 }
 
 // Live sessions, reported in the connect and disconnect lines.
 var activeSessions atomic.Int64
 
-func serveWS(w http.ResponseWriter, r *http.Request, eng *engine.Engine, log *zap.SugaredLogger) {
+func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrader, eng *engine.Engine, log *zap.SugaredLogger) {
 	// The last 6 of chi's request id, to tell concurrent clients apart in the log.
 	client := r.RemoteAddr
 	if id := middleware.GetReqID(r.Context()); len(id) >= 6 {

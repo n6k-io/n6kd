@@ -100,6 +100,7 @@ func newRouter(cfg Config, eng *engine.Engine, log *zap.SugaredLogger) http.Hand
 	if len(origins) == 0 {
 		origins = []string{"*"}
 	}
+	upgrader := newUpgrader(origins)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -119,7 +120,7 @@ func newRouter(cfg Config, eng *engine.Engine, log *zap.SugaredLogger) http.Hand
 	})
 
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWS(w, r, eng, log)
+		serveWS(w, r, upgrader, eng, log)
 	})
 
 	return r
