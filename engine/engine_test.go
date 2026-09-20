@@ -39,7 +39,7 @@ keys:
 `
 
 // open builds an engine from the fixtures above, skipping when the extensions
-// have not been built — this needs the real virtual_catalog, not a stand-in.
+// have not been built — this needs the real virtual_catalog_bridge, not a stand-in.
 func open(t *testing.T) *engine.Engine {
 	t.Helper()
 	if os.Getenv(engine.ExtensionDirEnv) == "" {
@@ -400,5 +400,63 @@ expose:
 	}
 	if err := eng.Close(); err != nil {
 		t.Errorf("close engine: %v", err)
+	}
+}
+
+func TestBridgeSpansSchemasInOneCatalog(t *testing.T) {
+	if os.Getenv(engine.ExtensionDirEnv) == "" {
+		t.Skipf("%s not set", engine.ExtensionDirEnv)
+	}
+
+	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "schema.sql")
+	permsPath := filepath.Join(dir, "perms.yml")
+	if err := os.WriteFile(schemaPath, []byte(`
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);
+INSERT INTO app.main.users VALUES (1, 'Ada');
+CREATE SCHEMA app.sales;
+CREATE TABLE app.sales.orders (id INTEGER PRIMARY KEY, total INTEGER);
+INSERT INTO app.sales.orders VALUES (1, 10), (2, 20);
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(permsPath, []byte(`
+expose:
+  app.main.users: read
+  app.sales.orders: readwrite
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := perms.Load(permsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.Open(t.Context(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := eng.Close(); err != nil {
+			t.Errorf("close engine: %v", err)
+		}
+	})
+	session := newSession(t, eng)
+
+	for query, want := range map[string]int{
+		`SELECT count(*) FROM app.main.users`:   1,
+		`SELECT count(*) FROM app.sales.orders`: 2,
+	} {
+		var got int
+		if err := session.DB().QueryRowContext(t.Context(), query).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		if got != want {
+			t.Errorf("%s: got %d, want %d", query, got, want)
+		}
+	}
+	if _, err := session.DB().ExecContext(t.Context(), `INSERT INTO app.sales.orders VALUES (3, 30)`); err != nil {
+		t.Fatalf("insert into readwrite table in second schema: %v", err)
 	}
 }

@@ -13,10 +13,11 @@
 // ATTACH 'n6k://...' AS <alias> (TYPE n6k, CATALOG 'app'). Anything unlisted
 // does not exist for clients.
 //
-// The rules enforced here are the ones src/virtual_catalog/bridge_bridge.cpp throws
-// on: read/readwrite only, no empty expose set, and a primary key for anything
-// writable. Checking them at startup turns a per-connection error into a
-// failure to boot, which is where a config mistake belongs.
+// Access is read or readwrite, the expose set may not be empty, and anything
+// writable needs a primary key — the last is what virtual_catalog_bridge would
+// otherwise refuse at ATTACH. Checking all three at startup turns a
+// per-connection error into a failure to boot, which is where a config mistake
+// belongs.
 package perms
 
 import (

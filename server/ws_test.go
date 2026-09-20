@@ -73,9 +73,20 @@ func newTestServer(t *testing.T) *httptest.Server {
 		}
 	})
 
-	srv := httptest.NewServer(newRouter(eng, log))
+	srv := httptest.NewServer(newRouter(Config{}, eng, log))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func loadClientExtension(t *testing.T, db *sql.DB) {
+	t.Helper()
+	path, err := engine.ExtensionPath("n6k_client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(t.Context(), fmt.Sprintf("LOAD '%s'", path)); err != nil {
+		t.Fatalf("load n6k client extension: %v", err)
+	}
 }
 
 func newDirectTestServer(t *testing.T) *httptest.Server {
@@ -104,7 +115,7 @@ func newDirectTestServerWithKey(t *testing.T, apiKey string) *httptest.Server {
 		}
 	})
 
-	srv := httptest.NewServer(newRouter(eng, log))
+	srv := httptest.NewServer(newRouter(Config{}, eng, log))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -159,7 +170,7 @@ func newAuthTestServer(t *testing.T, apiKey string) *httptest.Server {
 		}
 	})
 
-	srv := httptest.NewServer(newRouter(eng, log))
+	srv := httptest.NewServer(newRouter(Config{}, eng, log))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -174,11 +185,7 @@ func attachWithToken(t *testing.T, srv *httptest.Server, token string) error {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	extDir := os.Getenv(engine.ExtensionDirEnv)
-	if _, err := db.ExecContext(t.Context(),
-		fmt.Sprintf("LOAD '%s'", filepath.Join(extDir, "n6k_client", "n6k_client.duckdb_extension"))); err != nil {
-		t.Fatalf("load n6k client extension: %v", err)
-	}
+	loadClientExtension(t, db)
 
 	authority := strings.TrimPrefix(srv.URL, "http://")
 	attach := fmt.Sprintf("ATTACH 'n6k://%s' AS app (TYPE n6k, TOKEN '%s')", authority, token)
@@ -227,11 +234,7 @@ func TestAPIKeyInDirectMode(t *testing.T) {
 			}
 			defer func() { _ = db.Close() }()
 
-			extDir := os.Getenv(engine.ExtensionDirEnv)
-			if _, err := db.ExecContext(t.Context(),
-				fmt.Sprintf("LOAD '%s'", filepath.Join(extDir, "n6k_client", "n6k_client.duckdb_extension"))); err != nil {
-				t.Fatal(err)
-			}
+			loadClientExtension(t, db)
 
 			var count int
 			if _, attachErr := db.ExecContext(t.Context(),
@@ -294,7 +297,7 @@ func TestLockdownBlocksClientFileAccessOverWebSocket(t *testing.T) {
 			t.Errorf("close engine: %v", err)
 		}
 	})
-	srv := httptest.NewServer(newRouter(eng, log))
+	srv := httptest.NewServer(newRouter(Config{}, eng, log))
 	t.Cleanup(srv.Close)
 
 	db := newClient(t, srv)
@@ -359,11 +362,7 @@ func newClientAs(t *testing.T, srv *httptest.Server, alias, catalog string) *sql
 		}
 	})
 
-	extDir := os.Getenv(engine.ExtensionDirEnv)
-	if _, err := db.ExecContext(t.Context(),
-		fmt.Sprintf("LOAD '%s'", filepath.Join(extDir, "n6k_client", "n6k_client.duckdb_extension"))); err != nil {
-		t.Fatalf("load n6k client extension: %v", err)
-	}
+	loadClientExtension(t, db)
 
 	authority := strings.TrimPrefix(srv.URL, "http://")
 	attach := fmt.Sprintf("ATTACH 'n6k://%s' AS %s (TYPE n6k)", authority, alias)

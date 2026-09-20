@@ -9,6 +9,12 @@ go build -o n6kd .
 n6kd install   # download the n6k DuckDB extensions
 ```
 
+To run against local extension builds instead, point `N6K_EXTENSION_DIR` at
+their `build/release/extension` directories, colon-separated; each is searched
+for `<name>/<name>.duckdb_extension`. `virtual_catalog_bridge` comes from
+`duckdb-virtual-catalog`, `n6k_client` and `n6k_server` from `duckdb-driver`
+(see `.air.toml`). Tests skip when it is unset.
+
 ## Run
 
 ```sh

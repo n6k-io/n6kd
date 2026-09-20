@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"go.uber.org/zap"
 
 	"github.com/n6k-io/n6kd/engine"
@@ -20,12 +22,13 @@ import (
 const shutdownGrace = 10 * time.Second
 
 type Config struct {
-	Addr string
+	Addr           string
+	AllowedOrigins []string
 }
 
 func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLogger) error {
 	srv := &http.Server{
-		Handler:           newRouter(eng, log),
+		Handler:           newRouter(cfg, eng, log),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -92,11 +95,23 @@ func dialableAuthority(addr net.Addr) string {
 	return net.JoinHostPort(host, port)
 }
 
-func newRouter(eng *engine.Engine, log *zap.SugaredLogger) http.Handler {
+func newRouter(cfg Config, eng *engine.Engine, log *zap.SugaredLogger) http.Handler {
+	origins := cfg.AllowedOrigins
+	if len(origins) == 0 {
+		origins = []string{"*"}
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(requestLogger(log))
 	r.Use(middleware.Recoverer)
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   origins,
+		AllowedMethods:   []string{"GET", "OPTIONS"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowCredentials: !slices.Contains(origins, "*"),
+		MaxAge:           300,
+	}))
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
