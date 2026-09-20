@@ -5,26 +5,14 @@ import (
 	"strings"
 )
 
-func primaryKeyMap(keys map[string][]string) map[string]string {
-	out := make(map[string]string, len(keys))
-	for table, columns := range keys {
-		out[table] = strings.Join(columns, ",")
+// Interpolated because database/sql cannot bind a list; contents come from
+// perms.yml, never from a client.
+func listLiteral(items []string) string {
+	quoted := make([]string, len(items))
+	for i, item := range items {
+		quoted[i] = quoteString(item)
 	}
-	return out
-}
-
-// mapLiteral renders a DuckDB MAP. It is interpolated rather than bound because
-// database/sql cannot bind a MAP; the contents come from perms.yml, never from a
-// client, and both halves are escaped as string literals regardless.
-func mapLiteral(entries map[string]string) string {
-	if len(entries) == 0 {
-		return "MAP {}::MAP(VARCHAR, VARCHAR)"
-	}
-	pairs := make([]string, 0, len(entries))
-	for key, value := range entries {
-		pairs = append(pairs, fmt.Sprintf("%s: %s", quoteString(key), quoteString(value)))
-	}
-	return "MAP {" + strings.Join(pairs, ", ") + "}"
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func quoteString(s string) string {

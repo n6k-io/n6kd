@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -139,6 +140,8 @@ func newRootCmd() *cobra.Command {
 		"SQL run into the source database at boot; repeatable, in order with -f")
 	cmd.Flags().StringVar(&permsPath, "perms", "", "perms.yml naming the catalogs to serve bridged")
 	cmd.Flags().StringVar(&cfg.Addr, "addr", defaultAddr(), "address to listen on")
+	cmd.Flags().StringSliceVar(&cfg.AllowedOrigins, "allow-origin", defaultAllowedOrigins(),
+		"browser origins allowed to connect (WebSocket handshake and CORS); repeatable, default any")
 	cmd.Flags().StringVar(&apiKey, "api-key", os.Getenv("N6KD_API_KEY"),
 		"token clients must present to connect; without one, anyone who reaches the port is served")
 	cmd.Flags().BoolVar(&lockdown, "lockdown", os.Getenv("N6KD_NO_LOCKDOWN") == "",
@@ -161,7 +164,7 @@ func newInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Download the n6k DuckDB extensions into DuckDB's extension directory",
-		Long: "Installs the extensions this server loads (virtual_catalog, n6k_client, n6k_server) from\n" +
+		Long: "Installs the extensions this server loads (virtual_catalog_bridge, n6k_client, n6k_server) from\n" +
 			"the release bucket. Set " + engine.ExtensionHomeEnv + " to choose where they land and\n" +
 			engine.ExtensionRepoEnv + " to install from somewhere other than the default bucket.",
 		Args: cobra.NoArgs,
@@ -251,6 +254,13 @@ func defaultAddr() string {
 		return ":" + port
 	}
 	return ":8080"
+}
+
+func defaultAllowedOrigins() []string {
+	if v := os.Getenv("N6KD_ALLOW_ORIGIN"); v != "" {
+		return strings.Split(v, ",")
+	}
+	return nil
 }
 
 func plural(n int, noun string) string {

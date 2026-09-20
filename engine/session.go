@@ -68,58 +68,67 @@ func (e *Engine) NewSession(ctx context.Context, log *zap.SugaredLogger) (*Sessi
 	return &Session{db: db}, nil
 }
 
-// attachCatalog attaches the catalog once and bridges each of its schemas into
-// it. vcat_register_source takes a single source catalog.schema and bare table
-// names, so a schema is the unit a bridge covers.
+// The token expires after 30s idle, so nothing slow may sit between register and ATTACH.
 func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, catalog perms.Catalog) error {
-	if _, err := db.ExecContext(ctx,
-		fmt.Sprintf("ATTACH ':memory:' AS %s (TYPE virtual_catalog)", quoteIdent(name))); err != nil {
-		return err
-	}
-	for _, schemaName := range slices.Sorted(maps.Keys(catalog.Schemas)) {
-		if err := e.bridgeSchema(ctx, db, name, schemaName, catalog.Schemas[schemaName]); err != nil {
-			return fmt.Errorf("schema %q: %w", schemaName, err)
-		}
-	}
-	return nil
-}
-
-// bridgeSchema runs the two-sided handshake: the source registers the tables and
-// primary keys it exposes and returns a token, the target redeems it.
-func (e *Engine) bridgeSchema(ctx context.Context, db *sql.DB, catalog, schemaName string, schema perms.Schema) error {
 	bridgeID, err := newBridgeID()
 	if err != nil {
 		return err
 	}
 
 	var token string
-	err = e.source.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT vcat_register_source(?, ?, ?, %s, %s)",
-			mapLiteral(schema.Tables), mapLiteral(primaryKeyMap(schema.PrimaryKeys))),
-		bridgeID, catalog, schemaName,
-	).Scan(&token)
-	if err != nil {
+	if err := e.source.QueryRowContext(ctx,
+		"SELECT bridge_register_source(?, ?)", bridgeID, name,
+	).Scan(&token); err != nil {
 		return fmt.Errorf("register source: %w", err)
 	}
 
-	// The bridge requires the target schema to exist before it is set up.
-	if _, err := db.ExecContext(ctx,
-		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.%s", quoteIdent(catalog), quoteIdent(schemaName))); err != nil {
-		return err
+	for _, schemaName := range slices.Sorted(maps.Keys(catalog.Schemas)) {
+		schema := catalog.Schemas[schemaName]
+		for _, table := range slices.Sorted(maps.Keys(schema.Tables)) {
+			qualified := schemaName + "." + table
+			if key := schema.PrimaryKeys[table]; len(key) > 0 {
+				if _, err := e.source.ExecContext(ctx,
+					fmt.Sprintf("SELECT bridge_primary_key(?, ?, %s)", listLiteral(key)),
+					bridgeID, qualified); err != nil {
+					return fmt.Errorf("primary key %s: %w", qualified, err)
+				}
+			}
+			for _, g := range grantsFor(schema.Tables[table]) {
+				// A NULL fifth argument would make DuckDB skip the call entirely, not pass NULL.
+				stmt, args := "SELECT bridge_policy(?, ?, ?, ?)", []any{bridgeID, qualified, g.verb, g.using}
+				if g.check != "" {
+					stmt, args = "SELECT bridge_policy(?, ?, ?, ?, ?)", append(args, g.check)
+				}
+				if _, err := e.source.ExecContext(ctx, stmt, args...); err != nil {
+					return fmt.Errorf("grant %s %s: %w", g.verb, qualified, err)
+				}
+			}
+		}
 	}
 
-	var status string
-	err = db.QueryRowContext(ctx,
-		"SELECT vcat_setup_bridge(?, ?, ?, ?)",
-		bridgeID, token, catalog, schemaName,
-	).Scan(&status)
-	if err != nil {
-		return fmt.Errorf("setup bridge: %w", err)
-	}
-	if status != "ok" {
-		return fmt.Errorf("setup bridge: %s", status)
+	// ATTACH options fold to constants at bind time; ? placeholders are rejected.
+	if _, err := db.ExecContext(ctx,
+		fmt.Sprintf("ATTACH '' AS %s (TYPE virtual_catalog_bridge, ID %s, TOKEN %s)",
+			quoteIdent(name), quoteString(bridgeID), quoteString(token))); err != nil {
+		return fmt.Errorf("attach bridge: %w", err)
 	}
 	return nil
+}
+
+type grant struct {
+	verb, using, check string
+}
+
+func grantsFor(access string) []grant {
+	grants := []grant{{verb: "select", using: "true"}}
+	if access == perms.ReadWrite {
+		grants = append(grants,
+			grant{verb: "insert", using: "true", check: "true"},
+			grant{verb: "update", using: "true"},
+			grant{verb: "delete", using: "true"},
+		)
+	}
+	return grants
 }
 
 func newBridgeID() (string, error) {

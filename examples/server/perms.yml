@@ -1,0 +1,8 @@
+# Each key is catalog.table — the catalog part is what a client ATTACHes.
+expose:
+  # Parquet files loaded into memory at boot by in-memory.sql.
+  local.bank_failures: read
+  local.titanic: read
+
+  # The BigLake Iceberg catalog attached by iceberg.sql.
+  lake.reconciliation.events: read

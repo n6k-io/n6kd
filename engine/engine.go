@@ -2,8 +2,8 @@
 // the schema file created, and one bridged database per client session.
 //
 // The source is never handed to a client: a session gets a separate database
-// whose catalogs are attached TYPE virtual_catalog and populated by
-// vcat_setup_bridge from the tables perms.yml names.
+// whose catalogs are attached TYPE virtual_catalog_bridge, granted the tables
+// perms.yml names.
 package engine
 
 import (
@@ -14,7 +14,6 @@ import (
 	"maps"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -40,11 +39,11 @@ const ExtensionRepoEnv = "N6K_EXTENSION_REPO"
 
 const defaultExtensionRepo = "https://storage.googleapis.com/n6k-duckdb-release"
 
-// The source only answers bridge scans (virtual_catalog). A session is also
-// the end of a client's socket, which needs n6k_client and n6k_server.
+// The source only answers bridge scans (virtual_catalog_bridge). A session is
+// also the end of a client's socket, which needs n6k_client and n6k_server.
 var (
-	sourceExtensions  = []string{"virtual_catalog"}
-	sessionExtensions = []string{"virtual_catalog", "n6k_client", "n6k_server"}
+	sourceExtensions  = []string{"virtual_catalog_bridge"}
+	sessionExtensions = []string{"virtual_catalog_bridge", "n6k_client", "n6k_server"}
 )
 
 // InstallExtensions downloads every extension a session can need into DuckDB's
@@ -310,7 +309,7 @@ func (e *Engine) requireSourceTable(ctx context.Context, catalog, schema, table 
 	return nil
 }
 
-// resolvePrimaryKey mirrors what vcat_register_source does for a writable
+// resolvePrimaryKey mirrors what bridge discovery does for a writable
 // table: take the perms.yml override if there is one, otherwise discover the
 // declared key, and refuse the table if neither yields columns. The override is
 // additionally checked against duckdb_columns().
@@ -355,38 +354,4 @@ func (e *Engine) resolvePrimaryKey(ctx context.Context, catalog, schema, table s
 // Catalogs names what a session will carry, for logging at accept time.
 func (e *Engine) Catalogs() []string {
 	return e.catalogs
-}
-
-func openWithExtensions(ctx context.Context, extensions []string, log *zap.SugaredLogger) (*sql.DB, error) {
-	db, err := sql.Open("duckdb", extensionDSN())
-	if err != nil {
-		return nil, err
-	}
-	for _, name := range extensions {
-		target, err := extensionLoadArg(name)
-		if err != nil {
-			return nil, errors.Join(err, db.Close())
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("LOAD %s", quoteString(target))); err != nil {
-			return nil, errors.Join(fmt.Errorf("load %s: %w", name, err), db.Close())
-		}
-		log.Debugf("loaded extension %s from %s", name, target)
-	}
-	return db, nil
-}
-
-// extensionLoadArg returns a path under ExtensionDirEnv when that is set, and
-// otherwise the bare name, which LOAD resolves against DuckDB's
-// extension_directory — what InstallExtensions populated.
-func extensionLoadArg(name string) (string, error) {
-	dir := os.Getenv(ExtensionDirEnv)
-	if dir == "" {
-		return name, nil
-	}
-	path := filepath.Join(dir, name, name+".duckdb_extension")
-	// #nosec G703 -- dir comes from the operator's environment, name from a constant list.
-	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("extension %s: %w", name, err)
-	}
-	return path, nil
 }
