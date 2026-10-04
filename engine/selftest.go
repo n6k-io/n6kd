@@ -20,11 +20,15 @@ INSERT INTO app.main.audit_log VALUES (1, 'login');
 `
 
 const selftestPerms = `
-expose:
-  app.users: readwrite
-  app.audit_log: read
-keys:
-  app.users: [id]
+tables:
+  app.users:
+    key: [id]
+    select: true
+    insert: true
+    update: true
+    delete: true
+  app.audit_log:
+    select: true
 `
 
 // SelfTest runs a whole engine against fixtures of its own: it loads the three
@@ -79,11 +83,11 @@ func SelfTest(ctx context.Context, log *zap.SugaredLogger) error {
 
 	if _, err := session.DB().ExecContext(ctx,
 		`INSERT INTO app.main.users VALUES (3, 'Katherine')`); err != nil {
-		return fmt.Errorf("selftest write to readwrite table: %w", err)
+		return fmt.Errorf("selftest write to writable table: %w", err)
 	}
-	log.Infof("selftest: write to a readwrite table accepted")
+	log.Infof("selftest: write to a writable table accepted")
 
-	// audit_log is read in selftestPerms, so this INSERT must fail.
+	// audit_log grants only select in selftestPerms, so this INSERT must fail.
 	if _, err := session.DB().ExecContext(ctx,
 		`INSERT INTO app.main.audit_log VALUES (2, 'logout')`); err == nil {
 		return fmt.Errorf("selftest: write to a read-only table was accepted")

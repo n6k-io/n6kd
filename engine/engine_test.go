@@ -31,16 +31,25 @@ INSERT INTO app.main.audit_log VALUES (1, 'login');
 `
 
 const permsYAML = `
-expose:
-  app.users: readwrite
-  app.audit_log: read
-keys:
-  app.users: [id]
+tables:
+  app.users:
+    key: [id]
+    select: true
+    insert: true
+    update: true
+    delete: true
+  app.audit_log:
+    select: true
 `
 
 // open builds an engine from the fixtures above, skipping when the extensions
-// have not been built — this needs the real virtual_catalog, not a stand-in.
+// have not been built — this needs the real virtual_catalog_bridge, not a stand-in.
 func open(t *testing.T) *engine.Engine {
+	t.Helper()
+	return openWith(t, bridgedSchemaSQL, permsYAML)
+}
+
+func openWith(t *testing.T, schemaSQL, permsYML string) *engine.Engine {
 	t.Helper()
 	if os.Getenv(engine.ExtensionDirEnv) == "" {
 		t.Skipf("%s not set", engine.ExtensionDirEnv)
@@ -49,10 +58,10 @@ func open(t *testing.T) *engine.Engine {
 	dir := t.TempDir()
 	schemaPath := filepath.Join(dir, "schema.sql")
 	permsPath := filepath.Join(dir, "perms.yml")
-	if err := os.WriteFile(schemaPath, []byte(bridgedSchemaSQL), 0o600); err != nil {
+	if err := os.WriteFile(schemaPath, []byte(schemaSQL), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(permsPath, []byte(permsYAML), 0o600); err != nil {
+	if err := os.WriteFile(permsPath, []byte(permsYML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -105,7 +114,7 @@ func TestReadWriteTableAcceptsInsert(t *testing.T) {
 
 	if _, err := session.DB().ExecContext(t.Context(),
 		`INSERT INTO app.main.users VALUES (3, 'Katherine')`); err != nil {
-		t.Fatalf("insert into readwrite table: %v", err)
+		t.Fatalf("insert into writable table: %v", err)
 	}
 
 	var count int
@@ -118,7 +127,7 @@ func TestReadWriteTableAcceptsInsert(t *testing.T) {
 	}
 }
 
-// audit_log is read in the fixture perms, so an INSERT through the bridge fails.
+// audit_log grants only select in the fixture perms, so an INSERT through the bridge fails.
 func TestReadOnlyTableRejectsInsert(t *testing.T) {
 	session := newSession(t, open(t))
 
@@ -343,12 +352,16 @@ func TestMissingTableFailsAtStartup(t *testing.T) {
 	t.Logf("refused as expected: %v", err)
 }
 
-// resolvePrimaryKey refuses a readwrite table with no key, so Open fails.
+// resolvePrimaryKey refuses an updatable table with no key, so Open fails.
 func TestWritableTableWithoutPrimaryKeyFailsAtStartup(t *testing.T) {
 	const schema = `ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`
 	const rules = `
-expose:
-  app.events: readwrite
+tables:
+  app.events:
+    select: true
+    insert: true
+    update: true
+    delete: true
 `
 	err := openFails(t, schema, rules)
 	if !strings.Contains(err.Error(), "no primary key") {
@@ -356,13 +369,86 @@ expose:
 	}
 }
 
+func TestInsertOnlyTableNeedsNoPrimaryKey(t *testing.T) {
+	session := newSession(t, openWith(t,
+		`ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`, `
+tables:
+  app.events:
+    insert: true
+`))
+	if _, err := session.DB().ExecContext(t.Context(),
+		`INSERT INTO app.main.events VALUES (1, 'login')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, err := session.DB().ExecContext(t.Context(),
+		`SELECT count(*) FROM app.main.events`); err == nil {
+		t.Error("select succeeded without a select grant")
+	}
+}
+
+func TestRowPoliciesAreEnforced(t *testing.T) {
+	session := newSession(t, openWith(t, `
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, status VARCHAR, amount INTEGER);
+INSERT INTO app.main.orders VALUES (1, 'open', 10), (2, 'closed', 20), (3, 'deleted', 30);
+`, `
+tables:
+  app.orders:
+    select: "status <> 'deleted'"
+    insert: "amount > 0"
+    update: { using: "status = 'open'", check: "amount > 0" }
+    delete: "status = 'closed'"
+`))
+	db := session.DB()
+	exec := func(stmt string) (int64, error) {
+		res, err := db.ExecContext(t.Context(), stmt)
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	}
+	ids := func() string {
+		var got string
+		if err := db.QueryRowContext(t.Context(),
+			`SELECT string_agg(id::VARCHAR, ',' ORDER BY id) FROM app.main.orders`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	if got := ids(); got != "1,2" {
+		t.Errorf("select using: got ids %s, want 1,2", got)
+	}
+	if _, err := exec(`INSERT INTO app.main.orders VALUES (4, 'open', -1)`); err == nil {
+		t.Error("insert violating check succeeded")
+	}
+	if _, err := exec(`INSERT INTO app.main.orders VALUES (4, 'open', 5)`); err != nil {
+		t.Errorf("insert passing check: %v", err)
+	}
+	if n, err := exec(`UPDATE app.main.orders SET amount = 99`); err != nil || n != 2 {
+		t.Errorf("update using: got %d rows, %v; want the 2 open rows", n, err)
+	}
+	if _, err := exec(`UPDATE app.main.orders SET amount = -1 WHERE id = 1`); err == nil {
+		t.Error("update violating check succeeded")
+	}
+	if n, err := exec(`DELETE FROM app.main.orders`); err != nil || n != 1 {
+		t.Errorf("delete using: got %d rows, %v; want the 1 closed row", n, err)
+	}
+	if got := ids(); got != "1,4" {
+		t.Errorf("after writes: got ids %s, want 1,4", got)
+	}
+}
+
 func TestPrimaryKeyOverrideWithUnknownColumnFailsAtStartup(t *testing.T) {
 	const schema = `ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`
 	const rules = `
-expose:
-  app.events: readwrite
-keys:
-  app.events: [event_id]
+tables:
+  app.events:
+    key: [event_id]
+    select: true
+    insert: true
+    update: true
+    delete: true
 `
 	err := openFails(t, schema, rules)
 	if !strings.Contains(err.Error(), "event_id") {
@@ -384,8 +470,12 @@ func TestDiscoveredPrimaryKeyNeedsNoOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(permsPath, []byte(`
-expose:
-  app.events: readwrite
+tables:
+  app.events:
+    select: true
+    insert: true
+    update: true
+    delete: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -400,5 +490,68 @@ expose:
 	}
 	if err := eng.Close(); err != nil {
 		t.Errorf("close engine: %v", err)
+	}
+}
+
+func TestBridgeSpansSchemasInOneCatalog(t *testing.T) {
+	if os.Getenv(engine.ExtensionDirEnv) == "" {
+		t.Skipf("%s not set", engine.ExtensionDirEnv)
+	}
+
+	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "schema.sql")
+	permsPath := filepath.Join(dir, "perms.yml")
+	if err := os.WriteFile(schemaPath, []byte(`
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);
+INSERT INTO app.main.users VALUES (1, 'Ada');
+CREATE SCHEMA app.sales;
+CREATE TABLE app.sales.orders (id INTEGER PRIMARY KEY, total INTEGER);
+INSERT INTO app.sales.orders VALUES (1, 10), (2, 20);
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(permsPath, []byte(`
+tables:
+  app.main.users:
+    select: true
+  app.sales.orders:
+    select: true
+    insert: true
+    update: true
+    delete: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := perms.Load(permsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.Open(t.Context(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := eng.Close(); err != nil {
+			t.Errorf("close engine: %v", err)
+		}
+	})
+	session := newSession(t, eng)
+
+	for query, want := range map[string]int{
+		`SELECT count(*) FROM app.main.users`:   1,
+		`SELECT count(*) FROM app.sales.orders`: 2,
+	} {
+		var got int
+		if err := session.DB().QueryRowContext(t.Context(), query).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		if got != want {
+			t.Errorf("%s: got %d, want %d", query, got, want)
+		}
+	}
+	if _, err := session.DB().ExecContext(t.Context(), `INSERT INTO app.sales.orders VALUES (3, 30)`); err != nil {
+		t.Fatalf("insert into writable table in second schema: %v", err)
 	}
 }

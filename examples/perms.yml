@@ -2,11 +2,16 @@
 # main) or catalog.schema.table. It is served under that same name, so a client
 # reaches it as <alias>.main.users after
 # ATTACH 'n6k://host' AS <alias> (TYPE n6k, CATALOG 'app').
-# This is the complete list: an unlisted table does not exist for clients.
-expose:
-  app.main.users: readwrite
-  app.main.audit_log: read
+# This is the complete list: an unlisted table does not exist for clients, and
+# an unlisted verb is denied.
+tables:
+  app.main.users:
+    # Only needed where the bridge cannot discover the primary key itself.
+    key: [id]
+    select: true
+    insert: true
+    update: true
+    delete: true
 
-# Only needed where the bridge cannot discover the primary key itself.
-keys:
-  app.main.users: [id]
+  app.main.audit_log:
+    select: true
