@@ -258,7 +258,11 @@ func defaultAddr() string {
 
 func defaultAllowedOrigins() []string {
 	if v := os.Getenv("N6KD_ALLOW_ORIGIN"); v != "" {
-		return strings.Split(v, ",")
+		origins := strings.Split(v, ",")
+		for i, o := range origins {
+			origins[i] = strings.TrimSpace(o)
+		}
+		return origins
 	}
 	return nil
 }

@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
@@ -112,7 +113,8 @@ func traffic(frames, bytes int64) string {
 }
 
 // counters is what the session report is built from: written by the two pump
-// goroutines, read once both have stopped.
+// goroutines. When the serving CALL ends first, the pumps may still be running
+// as it is read, so the report can undercount.
 type counters struct {
 	framesIn  atomic.Int64
 	bytesIn   atomic.Int64
@@ -363,7 +365,11 @@ func sockToWS(ws *websocket.Conn, host *os.File, counts *counters) error {
 // closeWith sends a close frame, truncated to the 123 bytes RFC 6455 allows.
 func closeWith(ws *websocket.Conn, code int, reason string, log *zap.SugaredLogger) {
 	if len(reason) > 123 {
-		reason = reason[:123]
+		cut := 123
+		for cut > 0 && !utf8.RuneStart(reason[cut]) {
+			cut--
+		}
+		reason = reason[:cut]
 	}
 	deadline := time.Now().Add(time.Second)
 	msg := websocket.FormatCloseMessage(code, reason)

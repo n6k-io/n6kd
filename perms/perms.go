@@ -125,12 +125,6 @@ func Parse(raw []byte) (*File, error) {
 	var w wire
 	// Strict so a typo'd key is an error rather than a silently ignored setting.
 	if err := yaml.UnmarshalStrict(raw, &w); err != nil {
-		for _, legacy := range []string{`"expose"`, `"keys"`, `"source"`, `"catalogs"`, `"version"`} {
-			if strings.Contains(err.Error(), legacy) {
-				return nil, fmt.Errorf("legacy perms format: the file is now a `tables:` map "+
-					"of catalog.schema.table -> verbs (select, insert, update, delete) and an optional key (%w)", err)
-			}
-		}
 		return nil, err
 	}
 	return w.build()
