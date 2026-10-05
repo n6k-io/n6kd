@@ -277,7 +277,7 @@ func admitAndServe(ctx context.Context, conn *sql.Conn, eng *engine.Engine, sess
 		return errUnauthorized
 	}
 
-	if err := eng.Admit(ctx, session, log); err != nil {
+	if err := eng.Admit(ctx, session, nil, log); err != nil {
 		return err
 	}
 

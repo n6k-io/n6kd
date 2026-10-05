@@ -24,6 +24,10 @@ func Execute() error {
 	// graceful shutdown rather than killing in-flight requests.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := loadDotenv(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "n6kd:", err)
+		return err
+	}
 	return newRootCmd().ExecuteContext(ctx)
 }
 
@@ -133,6 +137,7 @@ func newRootCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newInstallCmd(), newSelfTestCmd())
+	addDotenvFlag(cmd.PersistentFlags())
 
 	cmd.Flags().VarP(&stepFlag{steps: &boot, file: true}, "file", "f",
 		"SQL file run into the source database at boot; repeatable, in order with -c")
