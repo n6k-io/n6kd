@@ -90,15 +90,11 @@ func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrade
 	elapsed := time.Since(started).Round(time.Millisecond)
 	if errors.Is(err, errUnauthorized) {
 		log.Infof("client %s rejected: %v — %d still connected", client, err, activeSessions.Load()-1)
-		closeWith(ws, websocket.ClosePolicyViolation, err.Error(), log)
 		return
 	}
 	if err != nil {
 		log.Errorf("client %s failed after %v: %v — %d still connected",
 			client, elapsed, err, activeSessions.Load()-1)
-		// Tell the client why rather than dropping the stream, which is
-		// indistinguishable from a network failure.
-		closeWith(ws, websocket.CloseInternalServerErr, err.Error(), log)
 		return
 	}
 	log.Infof("client %s disconnected after %v, %s in / %s out — %d still connected",
@@ -106,7 +102,6 @@ func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrade
 		traffic(counts.framesIn.Load(), counts.bytesIn.Load()),
 		traffic(counts.framesOut.Load(), counts.bytesOut.Load()),
 		activeSessions.Load()-1)
-	closeWith(ws, websocket.CloseNormalClosure, "", log)
 }
 
 func traffic(frames, bytes int64) string {
@@ -188,6 +183,8 @@ func serveSession(ctx context.Context, ws *websocket.Conn, eng *engine.Engine, l
 	if closeErr := host.Close(); closeErr != nil && pumpErr == nil {
 		pumpErr = closeErr
 	}
+	code, reason := closeFrame(pumpErr)
+	closeWith(ws, code, reason, log)
 	// Unblocks a ws read still parked in the pump goroutine.
 	if closeErr := ws.Close(); closeErr != nil {
 		log.Debugf("closing the websocket during teardown failed: %v", closeErr)
@@ -241,6 +238,16 @@ func pumpUntilEitherEnds(ws *websocket.Conn, host *os.File, serveDone <-chan err
 }
 
 var errUnauthorized = errors.New("unauthorized")
+
+func closeFrame(err error) (int, string) {
+	switch {
+	case errors.Is(err, errUnauthorized):
+		return websocket.ClosePolicyViolation, err.Error()
+	case err != nil:
+		return websocket.CloseInternalServerErr, err.Error()
+	}
+	return websocket.CloseNormalClosure, ""
+}
 
 func admitAndServe(ctx context.Context, conn *sql.Conn, eng *engine.Engine, session *engine.Session, fd int, log *zap.SugaredLogger) error {
 	blocking := context.WithoutCancel(ctx)
