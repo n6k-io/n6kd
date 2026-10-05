@@ -392,6 +392,39 @@ func TestClientReadsOverWebSocket(t *testing.T) {
 	}
 }
 
+func requireUsers(t *testing.T, db *sql.DB, table string, want int) {
+	t.Helper()
+	var count int
+	if err := db.QueryRowContext(t.Context(), fmt.Sprintf(`SELECT count(*) FROM %s`, table)).Scan(&count); err != nil {
+		t.Fatalf("query %s: %v", table, err)
+	}
+	if count != want {
+		t.Errorf("%s: got %d rows, want %d", table, count, want)
+	}
+}
+
+func TestTwoClientsServedAtOnce(t *testing.T) {
+	srv := newTestServer(t)
+	first, second := newClient(t, srv), newClient(t, srv)
+	requireUsers(t, first, "app.main.users", 2)
+	requireUsers(t, second, "app.main.users", 2)
+	requireUsers(t, first, "app.main.users", 2)
+}
+
+func TestDirectModeServesTwoClientsAtOnce(t *testing.T) {
+	srv := newDirectTestServer(t)
+	first, second := newClientAs(t, srv, "remote", "memory"), newClientAs(t, srv, "remote", "memory")
+	requireUsers(t, first, "remote.main.users", 2)
+	requireUsers(t, second, "remote.main.users", 2)
+}
+
+func TestAPIKeyRejectionNamesTheReason(t *testing.T) {
+	err := attachWithToken(t, newAuthTestServer(t, "s3cret"), "wrong")
+	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
+		t.Fatalf("got %v, want an unauthorized error", err)
+	}
+}
+
 func TestClientWritesOverWebSocket(t *testing.T) {
 	db := newClient(t, newTestServer(t))
 
