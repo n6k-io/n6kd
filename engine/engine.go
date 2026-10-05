@@ -232,12 +232,12 @@ func (e *Engine) Close() error {
 }
 
 // verifyPermsAgainstSource runs every check the bridge would otherwise run per session
-// against the loaded schema: the table exists, and a writable one resolves a
+// against the loaded schema: the table exists, and one granting update or delete resolves a
 // primary key. Doing it here turns a perms.yml mistake into a failure to boot
 // rather than an error on every client that connects. It also logs each
 // resolved table and its access.
 func (e *Engine) verifyPermsAgainstSource(ctx context.Context) error {
-	total, writable := 0, 0
+	total, keyed := 0, 0
 
 	for _, name := range slices.Sorted(maps.Keys(e.opts.Perms.Catalogs)) {
 		catalog := e.opts.Perms.Catalogs[name]
@@ -259,27 +259,29 @@ func (e *Engine) verifyPermsAgainstSource(ctx context.Context) error {
 				}
 				total++
 
-				if schema.Tables[table] != perms.ReadWrite {
-					e.log.Infof("  %-*s  read", width, qualify(name, schemaName, table))
+				t := schema.Tables[table]
+				verbs := strings.Join(t.Verbs(), ", ")
+				if !t.NeedsKey() {
+					e.log.Infof("  %-*s  %s", width, qualify(name, schemaName, table), verbs)
 					continue
 				}
-				writable++
-				key, origin, err := e.resolvePrimaryKey(ctx, name, schemaName, table, schema.PrimaryKeys[table])
+				keyed++
+				key, origin, err := e.resolvePrimaryKey(ctx, name, schemaName, table, t.Key)
 				if err != nil {
 					return err
 				}
-				e.log.Infof("  %-*s  readwrite, primary key %s (from %s)",
-					width, qualify(name, schemaName, table), strings.Join(key, ", "), origin)
+				e.log.Infof("  %-*s  %s, primary key %s (from %s)",
+					width, qualify(name, schemaName, table), verbs, strings.Join(key, ", "), origin)
 			}
 		}
 	}
 
-	if writable == 0 {
-		e.log.Infof("perms check passed: %s found, none writable", plural(total, "table"))
+	if keyed == 0 {
+		e.log.Infof("perms check passed: %s found, none needing a primary key", plural(total, "table"))
 		return nil
 	}
 	e.log.Infof("perms check passed: %s found, %s with a usable primary key",
-		plural(total, "table"), plural(writable, "writable table"))
+		plural(total, "table"), plural(keyed, "updatable or deletable table"))
 	return nil
 }
 
@@ -304,13 +306,13 @@ func (e *Engine) requireSourceTable(ctx context.Context, catalog, schema, table 
 		return err
 	}
 	if found == 0 {
-		return fmt.Errorf("expose names %s, which the boot SQL did not create", qualify(catalog, schema, table))
+		return fmt.Errorf("perms.yml names %s, which the boot SQL did not create", qualify(catalog, schema, table))
 	}
 	return nil
 }
 
-// resolvePrimaryKey mirrors what bridge discovery does for a writable
-// table: take the perms.yml override if there is one, otherwise discover the
+// resolvePrimaryKey mirrors what bridge discovery does for a table granting
+// update or delete: take the perms.yml override if there is one, otherwise discover the
 // declared key, and refuse the table if neither yields columns. The override is
 // additionally checked against duckdb_columns().
 func (e *Engine) resolvePrimaryKey(ctx context.Context, catalog, schema, table string, override []string) ([]string, string, error) {
@@ -327,7 +329,7 @@ func (e *Engine) resolvePrimaryKey(ctx context.Context, catalog, schema, table s
 				return nil, "", err
 			}
 			if found == 0 {
-				return nil, "", fmt.Errorf("keys for %s names column %q, which that table does not have",
+				return nil, "", fmt.Errorf("key for %s names column %q, which that table does not have",
 					qualify(catalog, schema, table), column)
 			}
 		}
@@ -342,7 +344,7 @@ func (e *Engine) resolvePrimaryKey(ctx context.Context, catalog, schema, table s
 		catalog, schema, table,
 	).Scan(&columns)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && columns.String == "") {
-		return nil, "", fmt.Errorf("%s is readwrite but has no primary key; declare one in the schema or add a keys override",
+		return nil, "", fmt.Errorf("%s grants update or delete but has no primary key; declare one in the schema or set key in perms.yml",
 			qualify(catalog, schema, table))
 	}
 	if err != nil {

@@ -86,21 +86,21 @@ func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, cat
 		schema := catalog.Schemas[schemaName]
 		for _, table := range slices.Sorted(maps.Keys(schema.Tables)) {
 			qualified := schemaName + "." + table
-			if key := schema.PrimaryKeys[table]; len(key) > 0 {
+			if key := schema.Tables[table].Key; len(key) > 0 {
 				if _, err := e.source.ExecContext(ctx,
 					fmt.Sprintf("SELECT bridge_primary_key(?, ?, %s)", listLiteral(key)),
 					bridgeID, qualified); err != nil {
 					return fmt.Errorf("primary key %s: %w", qualified, err)
 				}
 			}
-			for _, g := range grantsFor(schema.Tables[table]) {
+			for _, g := range schema.Tables[table].Grants {
 				// A NULL fifth argument would make DuckDB skip the call entirely, not pass NULL.
-				stmt, args := "SELECT bridge_policy(?, ?, ?, ?)", []any{bridgeID, qualified, g.verb, g.using}
-				if g.check != "" {
-					stmt, args = "SELECT bridge_policy(?, ?, ?, ?, ?)", append(args, g.check)
+				stmt, args := "SELECT bridge_policy(?, ?, ?, ?)", []any{bridgeID, qualified, g.Verb, g.Using}
+				if g.Check != "" {
+					stmt, args = "SELECT bridge_policy(?, ?, ?, ?, ?)", append(args, g.Check)
 				}
 				if _, err := e.source.ExecContext(ctx, stmt, args...); err != nil {
-					return fmt.Errorf("grant %s %s: %w", g.verb, qualified, err)
+					return fmt.Errorf("grant %s %s: %w", g.Verb, qualified, err)
 				}
 			}
 		}
@@ -113,22 +113,6 @@ func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, cat
 		return fmt.Errorf("attach bridge: %w", err)
 	}
 	return nil
-}
-
-type grant struct {
-	verb, using, check string
-}
-
-func grantsFor(access string) []grant {
-	grants := []grant{{verb: "select", using: "true"}}
-	if access == perms.ReadWrite {
-		grants = append(grants,
-			grant{verb: "insert", using: "true", check: "true"},
-			grant{verb: "update", using: "true"},
-			grant{verb: "delete", using: "true"},
-		)
-	}
-	return grants
 }
 
 func newBridgeID() (string, error) {

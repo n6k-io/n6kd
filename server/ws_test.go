@@ -33,11 +33,15 @@ INSERT INTO app.main.audit_log VALUES (1, 'login');
 `
 
 const permsYAML = `
-expose:
-  app.users: readwrite
-  app.audit_log: read
-keys:
-  app.users: [id]
+tables:
+  app.users:
+    key: [id]
+    select: true
+    insert: true
+    update: true
+    delete: true
+  app.audit_log:
+    select: true
 `
 
 // newTestServer serves the fixtures above over the real /ws route.

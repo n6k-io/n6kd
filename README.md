@@ -46,16 +46,40 @@ Boot SQL is run in the order given by `-f` (file) and `-c` (statement). Without
 ## perms.yml
 
 ```yaml
-expose:
-  app.users: readwrite
-  app.audit_log: read
+tables:
+  app.users:
+    key: [id]
+    select: true
+    insert: true
+    update: true
+    delete: true
 
-keys:
-  app.users: [id]
+  app.audit_log:
+    select: true
+
+  app.orders:
+    select: "status <> 'deleted'"
+    insert: "amount > 0"
+    update: { using: "status = 'open'", check: "amount > 0" }
+    delete: "status = 'closed'"
 ```
 
-Each key names a table as the server has it — `catalog.table` (schema defaults
-to `main`) or `catalog.schema.table` — and it is served under that same name:
+`select`, `insert`, and `delete` accept `true` or a SQL predicate; `update`
+accepts `true` or a `{using, check}` map. All policies are enforced by
+`virtual_catalog_bridge`, and an unlisted verb is denied.
+
+| Verb | Value |
+| --- | --- |
+| `select` | `true` or a `USING` predicate: rows a client can see |
+| `insert` | `true` or a `WITH CHECK` predicate: rows a client can add |
+| `update` | `true` or `{using, check}`: rows a client can change, and what they may become |
+| `delete` | `true` or a `USING` predicate: rows a client can remove |
+
+`update` and `delete` need a primary key. `key` overrides it where the bridge
+cannot discover one from the schema.
+
+Each table key names a table as the server has it — `catalog.table` (schema
+defaults to `main`) or `catalog.schema.table` — and it is served under that same name:
 
 ```sql
 ATTACH 'n6k://localhost:8080' AS eggs (TYPE n6k, CATALOG 'app');
@@ -65,7 +89,7 @@ SELECT * FROM eggs.main.users;
 The alias is the client's to pick; `CATALOG` selects the served catalog. An
 unlisted table does not exist for clients.
 
-`memory`, `system`, and `temp` cannot be exposed — every DuckDB already has
+`memory`, `system`, and `temp` cannot be served — every DuckDB already has
 them, so a served catalog cannot take those names. Boot SQL must `ATTACH` a
 catalog of its own rather than relying on the default.
 
