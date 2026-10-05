@@ -34,7 +34,9 @@ Boot SQL is run in the order given by `-f` (file) and `-c` (statement). Without
 | `--perms` | perms.yml naming the catalogs to serve bridged |
 | `--addr` | listen address (default `:8080`, or `$PORT`) |
 | `--api-key` | token clients must present (`N6KD_API_KEY`) |
+| `--allow-origin` | browser origins allowed to connect; repeatable, default any (`N6KD_ALLOW_ORIGIN`, comma-separated) |
 | `--lockdown` / `--no-lockdown` | deny served connections filesystem and extension access |
+| `--boot-only` | run the boot SQL, then exit without serving |
 | `--debug` | per-connection and per-catalog logging |
 | `--json-logging` | JSON logs with Cloud Logging severity fields |
 
@@ -97,7 +99,7 @@ catalog of its own rather than relying on the default.
 
 | Function | Description |
 | --- | --- |
-| `getenv(name)` | environment variable, NULL when unset; only available inside `-f` boot SQL |
+| `getenv(name)` | environment variable, NULL when unset; only available inside `-f` boot SQL and, with `--perms`, `n6kd_set_interval` bodies |
 | `n6kd_log(message)` | echoes the message into the server log, prefixed `sql:` |
 | `n6kd_set_interval(name, INTERVAL, sql)` | repeats `sql` against the source every interval; boot SQL only |
 

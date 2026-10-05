@@ -25,7 +25,6 @@ import (
 	"github.com/n6k-io/n6kd/perms"
 )
 
-// ExtensionDirEnv mirrors the Python loader, so both find the same local build.
 const ExtensionDirEnv = "N6K_EXTENSION_DIR"
 
 // ExtensionHomeEnv points DuckDB's own extension_directory at a baked install —
@@ -33,8 +32,7 @@ const ExtensionDirEnv = "N6K_EXTENSION_DIR"
 // and no network. Unrelated to ExtensionDirEnv, which names a different layout.
 const ExtensionHomeEnv = "N6K_EXTENSION_HOME"
 
-// ExtensionRepoEnv overrides the release bucket, which is the same one the
-// Python loader installs from.
+// ExtensionRepoEnv overrides the release bucket.
 const ExtensionRepoEnv = "N6K_EXTENSION_REPO"
 
 const defaultExtensionRepo = "https://storage.googleapis.com/n6k-duckdb-release"
@@ -161,7 +159,7 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 	env.setArmed(false)
 	tasks, err := intervals.disarm()
 	if err != nil {
-		return nil, errors.Join(err, source.Close())
+		return nil, errors.Join(err, closeTasks(tasks), source.Close())
 	}
 
 	if opts.Perms == nil {

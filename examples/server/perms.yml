@@ -1,6 +1,6 @@
 # Each key is catalog.table — the catalog part is what a client ATTACHes.
 tables:
-  # Parquet files loaded into memory at boot by in-memory.sql.
+  # Parquet files loaded into memory at boot by local.sql.
   local.bank_failures:
     select: true
   local.titanic:

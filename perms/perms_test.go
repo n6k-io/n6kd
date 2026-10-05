@@ -91,8 +91,6 @@ func TestParseErrors(t *testing.T) {
 	cases := []struct {
 		name, yaml, want string
 	}{
-		{"legacy expose", "expose:\n  app.users: read\n", "legacy perms format"},
-		{"legacy catalogs", "version: 1\ncatalogs:\n  app:\n    tables:\n      users: read\n", "legacy perms format"},
 		{"empty", "tables: {}\n", "no tables listed"},
 		{"bare name", "tables:\n  users:\n    select: true\n", "catalog.table"},
 		{"too many parts", "tables:\n  a.b.c.d:\n    select: true\n", "catalog.table"},

@@ -1,0 +1,1 @@
+Read .github/workflows/ for format, lint, test, etc best practices and follow these
