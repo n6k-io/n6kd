@@ -200,7 +200,7 @@ func (wt wireTable) build() (Table, error) {
 
 func updateGrant(raw json.RawMessage) (Grant, error) {
 	g := Grant{Verb: Update, Using: "true"}
-switch string(raw) {
+	switch string(raw) {
 	case "true":
 		return g, nil
 	case "null":
