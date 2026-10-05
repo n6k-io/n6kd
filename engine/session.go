@@ -34,38 +34,48 @@ func (s *Session) Close() error {
 	return s.db.Close()
 }
 
-// NewSession attaches every catalog in perms.yml as a bridge over the source.
-// log is the caller's per-client logger.
 func (e *Engine) NewSession(ctx context.Context, log *zap.SugaredLogger) (*Session, error) {
+	s, err := e.OpenSession(ctx, log)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.Admit(ctx, s, log); err != nil {
+		return nil, errors.Join(err, s.Close())
+	}
+	return s, nil
+}
+
+func (e *Engine) OpenSession(ctx context.Context, log *zap.SugaredLogger) (*Session, error) {
 	if e.opts.Perms == nil {
 		log.Debugf("session serves the source database directly")
 		return &Session{db: e.source, shared: true}, nil
 	}
-
-	started := time.Now()
 	db, err := openWithExtensions(ctx, sessionExtensions, log)
 	if err != nil {
 		return nil, err
 	}
-	if e.opts.APIKey != "" {
-		if err := registerAuthorizeUDF(ctx, db, e.opts.APIKey); err != nil {
-			return nil, errors.Join(err, db.Close())
-		}
+	return &Session{db: db}, nil
+}
+
+func (e *Engine) Admit(ctx context.Context, s *Session, log *zap.SugaredLogger) error {
+	if s.shared {
+		return nil
 	}
+	started := time.Now()
 	for _, name := range slices.Sorted(maps.Keys(e.opts.Perms.Catalogs)) {
-		if err := e.attachCatalog(ctx, db, name, e.opts.Perms.Catalogs[name]); err != nil {
-			return nil, errors.Join(fmt.Errorf("catalog %q: %w", name, err), db.Close())
+		if err := e.attachCatalog(ctx, s.db, name, e.opts.Perms.Catalogs[name]); err != nil {
+			return fmt.Errorf("catalog %q: %w", name, err)
 		}
 		log.Debugf("bridged catalog %q for this client", name)
 	}
 	if e.opts.Lockdown {
-		if err := applyLockdown(ctx, db); err != nil {
-			return nil, errors.Join(err, db.Close())
+		if err := applyLockdown(ctx, s.db); err != nil {
+			return err
 		}
 	}
 	log.Debugf("session ready with %s in %v",
 		plural(len(e.opts.Perms.Catalogs), "catalog"), time.Since(started).Round(time.Millisecond))
-	return &Session{db: db}, nil
+	return nil
 }
 
 // The token expires after 30s idle, so nothing slow may sit between register and ATTACH.

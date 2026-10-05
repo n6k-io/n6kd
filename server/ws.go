@@ -13,6 +13,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -87,6 +88,11 @@ func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrade
 	// carry the client without threading a string through every call.
 	err = serveSession(r.Context(), ws, eng, log.Named(client), &counts)
 	elapsed := time.Since(started).Round(time.Millisecond)
+	if errors.Is(err, errUnauthorized) {
+		log.Infof("client %s rejected: %v — %d still connected", client, err, activeSessions.Load()-1)
+		closeWith(ws, websocket.ClosePolicyViolation, err.Error(), log)
+		return
+	}
 	if err != nil {
 		log.Errorf("client %s failed after %v: %v — %d still connected",
 			client, elapsed, err, activeSessions.Load()-1)
@@ -125,7 +131,7 @@ type counters struct {
 // serveSession owns one client for its whole life: a private bridged database,
 // a socketpair, and the blocking CALL that serves it.
 func serveSession(ctx context.Context, ws *websocket.Conn, eng *engine.Engine, log *zap.SugaredLogger, counts *counters) (err error) {
-	session, err := eng.NewSession(ctx, log)
+	session, err := eng.OpenSession(ctx, log)
 	if err != nil {
 		return fmt.Errorf("open session: %w", err)
 	}
@@ -173,17 +179,9 @@ func serveSession(ctx context.Context, ws *websocket.Conn, eng *engine.Engine, l
 	}()
 
 	serveDone := make(chan error, 1)
-	go func() {
-		// Deliberately not ctx: cancelling the request must not kill the CALL out
-		// from under the reactor. Closing our socket end is what ends it, below.
-		log.Debugf("handing fd %d to the reactor", extFD)
-		_, callErr := conn.ExecContext(context.WithoutCancel(ctx),
-			fmt.Sprintf("CALL n6k_serve_fd(%d)", extFD))
-		log.Debugf("the reactor returned the fd (err: %v)", callErr)
-		serveDone <- callErr
-	}()
+	go func() { serveDone <- admitAndServe(ctx, conn, eng, session, extFD, log) }()
 
-	pumpErr := pumpUntilEitherEnds(ws, host, serveDone, counts)
+	pumpErr, served := pumpUntilEitherEnds(ws, host, serveDone, counts)
 
 	// Closing our end EOFs the extension's, which ends its reader loop and returns
 	// the CALL the select below waits on.
@@ -195,6 +193,9 @@ func serveSession(ctx context.Context, ws *websocket.Conn, eng *engine.Engine, l
 		log.Debugf("closing the websocket during teardown failed: %v", closeErr)
 	}
 
+	if served {
+		return pumpErr
+	}
 	select {
 	case callErr := <-serveDone:
 		if callErr != nil && pumpErr == nil {
@@ -212,7 +213,7 @@ func serveSession(ctx context.Context, ws *websocket.Conn, eng *engine.Engine, l
 // The CALL is watched alongside the two directions so a rejected fd ends the
 // connection with that error instead of leaving both sides blocked on a peer
 // that will never speak.
-func pumpUntilEitherEnds(ws *websocket.Conn, host *os.File, serveDone <-chan error, counts *counters) error {
+func pumpUntilEitherEnds(ws *websocket.Conn, host *os.File, serveDone <-chan error, counts *counters) (err error, served bool) {
 	toSock := make(chan error, 1)
 	go func() { toSock <- wsToSock(ws, host, counts) }()
 
@@ -221,15 +222,60 @@ func pumpUntilEitherEnds(ws *websocket.Conn, host *os.File, serveDone <-chan err
 
 	select {
 	case err := <-toSock:
-		return err
+		return err, false
 	case err := <-toWS:
-		return err
+		return err, false
 	case err := <-serveDone:
-		if err != nil {
-			return fmt.Errorf("serve: %w", err)
+		if errors.Is(err, errUnauthorized) {
+			select {
+			case <-toWS:
+			case <-time.After(time.Second):
+			}
+			return err, true
 		}
-		return nil
+		if err != nil {
+			return fmt.Errorf("serve: %w", err), true
+		}
+		return nil, true
 	}
+}
+
+var errUnauthorized = errors.New("unauthorized")
+
+func admitAndServe(ctx context.Context, conn *sql.Conn, eng *engine.Engine, session *engine.Session, fd int, log *zap.SugaredLogger) error {
+	blocking := context.WithoutCancel(ctx)
+
+	var token string
+	if err := conn.QueryRowContext(blocking,
+		fmt.Sprintf("SELECT token FROM n6k_handshake(%d)", fd)).Scan(&token); err != nil {
+		return fmt.Errorf("handshake: %w", err)
+	}
+	if !eng.Authorized(token) {
+		if _, err := conn.ExecContext(blocking,
+			fmt.Sprintf("CALL n6k_reject(%d, '%s')", fd, errUnauthorized)); err != nil {
+			return errors.Join(errUnauthorized, fmt.Errorf("reject: %w", err))
+		}
+		return errUnauthorized
+	}
+
+	if err := eng.Admit(ctx, session, log); err != nil {
+		return err
+	}
+
+	log.Debugf("handing fd %d to the reactor", fd)
+	_, err := conn.ExecContext(blocking, serveStatement(fd, eng.Catalogs()))
+	log.Debugf("the reactor returned the fd (err: %v)", err)
+	return err
+}
+
+func serveStatement(fd int, catalogs []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "CALL n6k_serve_fd(%d", fd)
+	for _, c := range catalogs {
+		fmt.Fprintf(&b, ", '%s'", strings.ReplaceAll(c, "'", "''"))
+	}
+	b.WriteString(")")
+	return b.String()
 }
 
 func wsToSock(ws *websocket.Conn, host *os.File, counts *counters) error {

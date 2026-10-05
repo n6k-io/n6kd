@@ -165,11 +165,6 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 	}
 
 	if opts.Perms == nil {
-		if opts.APIKey != "" {
-			if err := registerAuthorizeUDF(ctx, source, opts.APIKey); err != nil {
-				return nil, errors.Join(err, closeTasks(tasks), source.Close())
-			}
-		}
 		if err := engine.collectSourceCatalogs(ctx); err != nil {
 			return nil, errors.Join(err, closeTasks(tasks), source.Close())
 		}
