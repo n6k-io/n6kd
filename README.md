@@ -64,8 +64,9 @@ tables:
     delete: "status = 'closed'"
 ```
 
-Each verb is `true` or a SQL predicate, enforced by `virtual_catalog_bridge`.
-An unlisted verb is denied.
+`select`, `insert`, and `delete` accept `true` or a SQL predicate; `update`
+accepts `true` or a `{using, check}` map. All policies are enforced by
+`virtual_catalog_bridge`, and an unlisted verb is denied.
 
 | Verb | Value |
 | --- | --- |

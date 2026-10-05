@@ -200,8 +200,11 @@ func (wt wireTable) build() (Table, error) {
 
 func updateGrant(raw json.RawMessage) (Grant, error) {
 	g := Grant{Verb: Update, Using: "true"}
-	if string(raw) == "true" {
+switch string(raw) {
+	case "true":
 		return g, nil
+	case "null":
+		return g, fmt.Errorf("want true or a map of using and/or check; omit the verb to deny it")
 	}
 	var wu wireUpdate
 	dec := json.NewDecoder(bytes.NewReader(raw))
