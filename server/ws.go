@@ -233,7 +233,7 @@ func pumpUntilEitherEnds(ws *websocket.Conn, host *os.File, serveDone <-chan err
 	}
 }
 
-var errUnauthorized = errors.New("unauthorized")
+var errUnauthorized = engine.ErrUnauthorized
 
 type wsCloser struct {
 	ws   *websocket.Conn
@@ -269,20 +269,22 @@ func admitAndServe(ctx context.Context, conn *sql.Conn, eng *engine.Engine, sess
 		fmt.Sprintf("SELECT token FROM n6k_handshake(%d)", fd)).Scan(&token); err != nil {
 		return fmt.Errorf("handshake: %w", err)
 	}
-	if !eng.Authorized(token) {
-		if _, err := conn.ExecContext(blocking,
-			fmt.Sprintf("CALL n6k_reject(%d, '%s')", fd, errUnauthorized)); err != nil {
-			return errors.Join(errUnauthorized, fmt.Errorf("reject: %w", err))
+	claims, err := eng.Authenticate(ctx, token)
+	if err != nil {
+		log.Debugf("token refused: %v", err)
+		if _, rejectErr := conn.ExecContext(blocking,
+			fmt.Sprintf("CALL n6k_reject(%d, '%s')", fd, errUnauthorized)); rejectErr != nil {
+			return errors.Join(errUnauthorized, fmt.Errorf("reject: %w", rejectErr))
 		}
 		return errUnauthorized
 	}
 
-	if err := eng.Admit(ctx, session, nil, log); err != nil {
+	if err := eng.Admit(ctx, session, claims, log); err != nil {
 		return err
 	}
 
 	log.Debugf("handing fd %d to the reactor", fd)
-	_, err := conn.ExecContext(blocking, serveStatement(fd, eng.Catalogs()))
+	_, err = conn.ExecContext(blocking, serveStatement(fd, eng.Catalogs()))
 	log.Debugf("the reactor returned the fd (err: %v)", err)
 	return err
 }

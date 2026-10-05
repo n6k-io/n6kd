@@ -34,6 +34,9 @@ Boot SQL is run in the order given by `-f` (file) and `-c` (statement). Without
 | `--perms` | perms.yml naming the catalogs to serve bridged |
 | `--addr` | listen address (default `:8080`, or `$PORT`) |
 | `--api-key` | token clients must present (`N6KD_API_KEY`) |
+| `--oidc-issuer-url` | OIDC issuer whose JWTs clients must present (`N6KD_OIDC_ISSUER_URL`); not with `--api-key` |
+| `--oidc-audience` | `aud` claim a client's JWT must carry (`N6KD_OIDC_AUDIENCE`); required with `--oidc-issuer-url` |
+| `--load-dotenv[=path]` | load environment variables from `.env` (or `path`) first; variables already set win |
 | `--allow-origin` | browser origins allowed to connect; repeatable, default any (`N6KD_ALLOW_ORIGIN`, comma-separated) |
 | `--lockdown` / `--no-lockdown` | deny served connections filesystem and extension access |
 | `--boot-only` | run the boot SQL, then exit without serving |
@@ -94,6 +97,32 @@ unlisted table does not exist for clients.
 `memory`, `system`, and `temp` cannot be served — every DuckDB already has
 them, so a served catalog cannot take those names. Boot SQL must `ATTACH` a
 catalog of its own rather than relying on the default.
+
+### JWT claims
+
+With `--oidc-issuer-url`, a client passes its JWT as the ATTACH token:
+
+```sql
+ATTACH 'n6k://localhost:8080' AS app (TYPE n6k, TOKEN '<jwt>');
+```
+
+n6kd discovers the issuer's signing keys at boot and checks each token's
+signature, `iss`, `aud`, and `exp`. A token that fails is refused as
+`unauthorized`.
+
+Every string, boolean, and number claim in the token is available to policy
+predicates as `$name` — `$sub`, `$iss`, `$exp`, `$email`, and any custom
+claim. Array and object claims are left out, and so is `aud` when it is a list.
+
+```yaml
+tables:
+  app.orders:
+    select: "owner = $sub"
+    insert: "owner = $sub"
+```
+
+Values are bound as typed constants, never spliced into the SQL. A predicate
+naming a claim the token does not carry refuses the connection.
 
 ## SQL functions
 

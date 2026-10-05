@@ -12,6 +12,8 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/n6k-io/n6kd/auth"
+	"github.com/n6k-io/n6kd/auth/authtest"
 	"github.com/n6k-io/n6kd/engine"
 	"github.com/n6k-io/n6kd/perms"
 )
@@ -416,6 +418,81 @@ func TestDirectModeServesTwoClientsAtOnce(t *testing.T) {
 	first, second := newClientAs(t, srv, "remote", "memory"), newClientAs(t, srv, "remote", "memory")
 	requireUsers(t, first, "remote.main.users", 2)
 	requireUsers(t, second, "remote.main.users", 2)
+}
+
+func TestOIDCClaimsDriveRowPolicies(t *testing.T) {
+	if os.Getenv(engine.ExtensionDirEnv) == "" {
+		t.Skipf("%s not set", engine.ExtensionDirEnv)
+	}
+	issuer := authtest.NewIssuer(t)
+	verifier, err := auth.NewOIDC(t.Context(), issuer.URL, "n6kd")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	schemaPath := filepath.Join(dir, "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte(`
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, owner VARCHAR);
+INSERT INTO app.main.orders VALUES (1, 'alice'), (2, 'bob'), (3, 'alice');
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := perms.Parse([]byte(`
+tables:
+  app.orders:
+    select: "owner = $sub"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := zaptest.NewLogger(t).Sugar()
+	eng, err := engine.Open(t.Context(),
+		engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, Verifier: verifier}, log)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := eng.Close(); err != nil {
+			t.Errorf("close engine: %v", err)
+		}
+	})
+	srv := httptest.NewServer(newRouter(Config{}, eng, log))
+	t.Cleanup(srv.Close)
+
+	ids := func(token string) (string, error) {
+		db, err := sql.Open("duckdb", "?allow_unsigned_extensions=true")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		loadClientExtension(t, db)
+		authority := strings.TrimPrefix(srv.URL, "http://")
+		if _, err := db.ExecContext(t.Context(),
+			fmt.Sprintf("ATTACH 'n6k://%s' AS app (TYPE n6k, TOKEN '%s')", authority, token)); err != nil {
+			return "", err
+		}
+		var got string
+		err = db.QueryRowContext(t.Context(),
+			`SELECT string_agg(id::VARCHAR, ',' ORDER BY id) FROM app.main.orders`).Scan(&got)
+		return got, err
+	}
+
+	for sub, want := range map[string]string{"alice": "1,3", "bob": "2"} {
+		got, err := ids(issuer.Token(t, "n6kd", map[string]any{"sub": sub}))
+		if err != nil {
+			t.Fatalf("%s: %v", sub, err)
+		}
+		if got != want {
+			t.Errorf("%s sees ids %s, want %s", sub, got, want)
+		}
+	}
+
+	forged := authtest.NewIssuer(t).Token(t, "n6kd", map[string]any{"sub": "alice", "iss": issuer.URL})
+	if _, err := ids(forged); err == nil || !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("forged token: got %v, want an unauthorized error", err)
+	}
 }
 
 func TestAPIKeyRejectionNamesTheReason(t *testing.T) {

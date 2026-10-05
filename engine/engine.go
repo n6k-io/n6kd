@@ -92,7 +92,8 @@ type Options struct {
 	// nil means no perms.yml: sessions share the source directly, unbridged.
 	Perms *perms.File
 	// Empty means no authentication; otherwise clients must present this token.
-	APIKey string
+	APIKey   string
+	Verifier TokenVerifier
 	// Lockdown takes the local filesystem and extension installation away from
 	// served connections.
 	Lockdown bool
