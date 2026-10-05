@@ -42,4 +42,4 @@ formatters:
       # with the given prefixes are grouped after 3rd-party packages.
       # Default: []
       local-prefixes:
-        - github.com/risk-guard
+        - github.com/n6k-io/n6kd

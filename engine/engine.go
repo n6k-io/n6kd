@@ -32,8 +32,7 @@ const ExtensionDirEnv = "N6K_EXTENSION_DIR"
 // and no network. Unrelated to ExtensionDirEnv, which names a different layout.
 const ExtensionHomeEnv = "N6K_EXTENSION_HOME"
 
-// ExtensionRepoEnv overrides the release bucket, which is the same one the
-// Python loader installs from.
+// ExtensionRepoEnv overrides the release bucket.
 const ExtensionRepoEnv = "N6K_EXTENSION_REPO"
 
 const defaultExtensionRepo = "https://storage.googleapis.com/n6k-duckdb-release"

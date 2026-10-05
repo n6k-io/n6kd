@@ -16,7 +16,7 @@ var lockdownSettings = []string{
 }
 
 // applyLockdown must be called after the schema load, extension loads and
-// bridge setup — see the call sites in engine.go.
+// bridge setup — see the call sites in engine.go and session.go.
 func applyLockdown(ctx context.Context, db *sql.DB) error {
 	for _, stmt := range lockdownSettings {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
