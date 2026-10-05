@@ -23,6 +23,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -69,13 +70,9 @@ func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrade
 		log.Errorf("client %s failed to upgrade to a websocket: %v", client, err)
 		return
 	}
-	defer func() {
-		if err := ws.Close(); err != nil {
-			log.Debugf("client %s: closing the websocket failed: %v", client, err)
-		}
-	}()
-
 	ws.SetReadLimit(maxFrameBytes)
+	closer := &wsCloser{ws: ws, log: log.Named(client)}
+	defer func() { closer.finish(err) }()
 
 	active := activeSessions.Add(1)
 	defer activeSessions.Add(-1)
@@ -86,7 +83,7 @@ func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrade
 	started := time.Now()
 	// Named rather than prefixed by hand, so the session and engine lines below
 	// carry the client without threading a string through every call.
-	err = serveSession(r.Context(), ws, eng, log.Named(client), &counts)
+	err = serveSession(r.Context(), closer, eng, log.Named(client), &counts)
 	elapsed := time.Since(started).Round(time.Millisecond)
 	if errors.Is(err, errUnauthorized) {
 		log.Infof("client %s rejected: %v — %d still connected", client, err, activeSessions.Load()-1)
@@ -125,7 +122,8 @@ type counters struct {
 
 // serveSession owns one client for its whole life: a private bridged database,
 // a socketpair, and the blocking CALL that serves it.
-func serveSession(ctx context.Context, ws *websocket.Conn, eng *engine.Engine, log *zap.SugaredLogger, counts *counters) (err error) {
+func serveSession(ctx context.Context, closer *wsCloser, eng *engine.Engine, log *zap.SugaredLogger, counts *counters) (err error) {
+	ws := closer.ws
 	session, err := eng.OpenSession(ctx, log)
 	if err != nil {
 		return fmt.Errorf("open session: %w", err)
@@ -183,12 +181,8 @@ func serveSession(ctx context.Context, ws *websocket.Conn, eng *engine.Engine, l
 	if closeErr := host.Close(); closeErr != nil && pumpErr == nil {
 		pumpErr = closeErr
 	}
-	code, reason := closeFrame(pumpErr)
-	closeWith(ws, code, reason, log)
 	// Unblocks a ws read still parked in the pump goroutine.
-	if closeErr := ws.Close(); closeErr != nil {
-		log.Debugf("closing the websocket during teardown failed: %v", closeErr)
-	}
+	closer.finish(pumpErr)
 
 	if served {
 		return pumpErr
@@ -238,6 +232,22 @@ func pumpUntilEitherEnds(ws *websocket.Conn, host *os.File, serveDone <-chan err
 }
 
 var errUnauthorized = errors.New("unauthorized")
+
+type wsCloser struct {
+	ws   *websocket.Conn
+	log  *zap.SugaredLogger
+	once sync.Once
+}
+
+func (c *wsCloser) finish(err error) {
+	c.once.Do(func() {
+		code, reason := closeFrame(err)
+		closeWith(c.ws, code, reason, c.log)
+		if closeErr := c.ws.Close(); closeErr != nil {
+			c.log.Debugf("closing the websocket failed: %v", closeErr)
+		}
+	})
+}
 
 func closeFrame(err error) (int, string) {
 	switch {
