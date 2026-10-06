@@ -136,7 +136,7 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(newInstallCmd(), newSelfTestCmd())
+	cmd.AddCommand(newInstallCmd(), newSelfTestCmd(), newMCPCmd(), newAuthCmd())
 	addDotenvFlag(cmd.PersistentFlags())
 
 	cmd.Flags().VarP(&stepFlag{steps: &boot, file: true}, "file", "f",
