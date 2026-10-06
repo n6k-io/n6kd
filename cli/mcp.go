@@ -134,13 +134,14 @@ func (s *mcpSession) connect(ctx context.Context) error {
 	s.link = link
 	s.log.Infof("connected to %s", s.flags.server)
 
+	var errs []error
 	for alias, catalog := range s.attached {
 		if _, err := s.attachOverLink(ctx, alias, catalog); err != nil {
 			delete(s.attached, alias)
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (s *mcpSession) disconnect(ctx context.Context) error {
