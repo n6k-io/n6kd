@@ -39,7 +39,7 @@ func (e *Engine) NewSession(ctx context.Context, log *zap.SugaredLogger) (*Sessi
 	if err != nil {
 		return nil, err
 	}
-	if err := e.Admit(ctx, s, log); err != nil {
+	if err := e.Admit(ctx, s, nil, log); err != nil {
 		return nil, errors.Join(err, s.Close())
 	}
 	return s, nil
@@ -57,13 +57,13 @@ func (e *Engine) OpenSession(ctx context.Context, log *zap.SugaredLogger) (*Sess
 	return &Session{db: db}, nil
 }
 
-func (e *Engine) Admit(ctx context.Context, s *Session, log *zap.SugaredLogger) error {
+func (e *Engine) Admit(ctx context.Context, s *Session, values map[string]any, log *zap.SugaredLogger) error {
 	if s.shared {
 		return nil
 	}
 	started := time.Now()
 	for _, name := range slices.Sorted(maps.Keys(e.opts.Perms.Catalogs)) {
-		if err := e.attachCatalog(ctx, s.db, name, e.opts.Perms.Catalogs[name]); err != nil {
+		if err := e.attachCatalog(ctx, s.db, name, e.opts.Perms.Catalogs[name], values); err != nil {
 			return fmt.Errorf("catalog %q: %w", name, err)
 		}
 		log.Debugf("bridged catalog %q for this client", name)
@@ -79,7 +79,7 @@ func (e *Engine) Admit(ctx context.Context, s *Session, log *zap.SugaredLogger) 
 }
 
 // The token expires after 30s idle, so nothing slow may sit between register and ATTACH.
-func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, catalog perms.Catalog) error {
+func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, catalog perms.Catalog, values map[string]any) error {
 	bridgeID, err := newBridgeID()
 	if err != nil {
 		return err
@@ -90,6 +90,13 @@ func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, cat
 		"SELECT bridge_register_source(?, ?)", bridgeID, name,
 	).Scan(&token); err != nil {
 		return fmt.Errorf("register source: %w", err)
+	}
+
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		if _, err := e.source.ExecContext(ctx,
+			"SELECT bridge_set_context(?, ?, ?)", bridgeID, key, values[key]); err != nil {
+			return fmt.Errorf("context %s: %w", key, err)
+		}
 	}
 
 	for _, schemaName := range slices.Sorted(maps.Keys(catalog.Schemas)) {
@@ -114,6 +121,10 @@ func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, cat
 				}
 			}
 		}
+	}
+
+	if _, err := e.source.ExecContext(ctx, "SELECT bridge_finalize_context(?)", bridgeID); err != nil {
+		return fmt.Errorf("finalize context: %w", err)
 	}
 
 	// ATTACH options fold to constants at bind time; ? placeholders are rejected.

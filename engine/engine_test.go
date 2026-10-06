@@ -439,6 +439,54 @@ tables:
 	}
 }
 
+func TestContextValuesReachPolicies(t *testing.T) {
+	eng := openWith(t, `
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, owner VARCHAR);
+INSERT INTO app.main.orders VALUES (1, 'alice'), (2, 'bob'), (3, 'alice');
+`, `
+tables:
+  app.orders:
+    select: "owner = $sub"
+`)
+	log := zaptest.NewLogger(t).Sugar()
+	session, err := eng.OpenSession(t.Context(), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Errorf("close session: %v", err)
+		}
+	})
+	if err := eng.Admit(t.Context(), session, map[string]any{"sub": "alice"}, log); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+
+	var got string
+	if err := session.DB().QueryRowContext(t.Context(),
+		`SELECT string_agg(id::VARCHAR, ',' ORDER BY id) FROM app.main.orders`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "1,3" {
+		t.Errorf("got ids %s, want 1,3", got)
+	}
+}
+
+func TestPolicyWithUnsetContextFailsToAdmit(t *testing.T) {
+	eng := openWith(t, `
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, owner VARCHAR);
+`, `
+tables:
+  app.orders:
+    select: "owner = $sub"
+`)
+	if _, err := eng.NewSession(t.Context(), zaptest.NewLogger(t).Sugar()); err == nil || !strings.Contains(err.Error(), "$sub") {
+		t.Errorf("got %v, want an error naming $sub", err)
+	}
+}
+
 func TestPrimaryKeyOverrideWithUnknownColumnFailsAtStartup(t *testing.T) {
 	const schema = `ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`
 	const rules = `

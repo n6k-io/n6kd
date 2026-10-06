@@ -24,13 +24,17 @@ func Execute() error {
 	// graceful shutdown rather than killing in-flight requests.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := loadDotenv(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "n6kd:", err)
+		return err
+	}
 	return newRootCmd().ExecuteContext(ctx)
 }
 
 func newRootCmd() *cobra.Command {
 	var cfg server.Config
 	var permsPath string
-	var apiKey string
+	var authn authFlags
 	var lockdown, noLockdown bool
 	var debug, jsonLogs bool
 	var bootOnly bool
@@ -105,16 +109,16 @@ func newRootCmd() *cobra.Command {
 				log.Warnf("lockdown off: a client's SQL can read and write this host's files")
 			}
 
-			if apiKey == "" {
-				log.Warnf("no --api-key given: any client that can reach the port is served")
-			} else {
-				log.Infof("clients must present the --api-key token")
+			verifier, err := authn.verifier(cmd.Context(), log)
+			if err != nil {
+				return err
 			}
 
 			eng, err := engine.Open(cmd.Context(), engine.Options{
 				Boot:     boot,
 				Perms:    rules,
-				APIKey:   apiKey,
+				APIKey:   authn.apiKey,
+				Verifier: verifier,
 				Lockdown: lockdown,
 			}, log)
 			if err != nil {
@@ -132,7 +136,8 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(newInstallCmd(), newSelfTestCmd())
+	cmd.AddCommand(newInstallCmd(), newSelfTestCmd(), newMCPCmd(), newAuthCmd())
+	addDotenvFlag(cmd.PersistentFlags())
 
 	cmd.Flags().VarP(&stepFlag{steps: &boot, file: true}, "file", "f",
 		"SQL file run into the source database at boot; repeatable, in order with -c")
@@ -142,8 +147,12 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.Addr, "addr", defaultAddr(), "address to listen on")
 	cmd.Flags().StringSliceVar(&cfg.AllowedOrigins, "allow-origin", defaultAllowedOrigins(),
 		"browser origins allowed to connect (WebSocket handshake and CORS); repeatable, default any")
-	cmd.Flags().StringVar(&apiKey, "api-key", os.Getenv("N6KD_API_KEY"),
+	cmd.Flags().StringVar(&authn.apiKey, "api-key", os.Getenv("N6KD_API_KEY"),
 		"token clients must present to connect; without one, anyone who reaches the port is served")
+	cmd.Flags().StringVar(&authn.issuerURL, "oidc-issuer-url", os.Getenv("N6KD_OIDC_ISSUER_URL"),
+		"OIDC issuer whose JWTs clients must present; their claims become $name context in perms.yml")
+	cmd.Flags().StringVar(&authn.audience, "oidc-audience", os.Getenv("N6KD_OIDC_AUDIENCE"),
+		"aud claim a client's JWT must carry; required with --oidc-issuer-url")
 	cmd.Flags().BoolVar(&lockdown, "lockdown", os.Getenv("N6KD_NO_LOCKDOWN") == "",
 		"take the local filesystem and extension installation away from served connections")
 	cmd.Flags().BoolVar(&noLockdown, "no-lockdown", false, "the inverse of --lockdown")
