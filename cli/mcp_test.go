@@ -113,7 +113,9 @@ func startMCP(t *testing.T, servers map[string]string) (*mcp.ClientSession, stri
 	t.Cleanup(func() {
 		_ = cs.Close()
 		cancel()
-		<-done
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Error(err)
+		}
 	})
 	return cs, configPath
 }

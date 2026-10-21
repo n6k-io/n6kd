@@ -111,9 +111,10 @@ func TestListenServesConcurrentClientsAfterAProbe(t *testing.T) {
 		t.Fatalf("socket file: %v, %v; want mode 0600", info, err)
 	}
 
+	eng := newDirectEngine(t, "")
 	ctx, cancel := context.WithCancel(t.Context())
 	served := make(chan error, 1)
-	go func() { served <- ServeListen(ctx, ln, newDirectEngine(t, ""), zaptest.NewLogger(t).Sugar()) }()
+	go func() { served <- ServeListen(ctx, ln, eng, zaptest.NewLogger(t).Sugar()) }()
 
 	probe, err := dialUnix(path)
 	if err != nil {
@@ -148,9 +149,10 @@ func TestListenIgnoresTheHelloToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng := newDirectEngine(t, "")
 	ctx, cancel := context.WithCancel(t.Context())
 	served := make(chan error, 1)
-	go func() { served <- ServeListen(ctx, ln, newDirectEngine(t, ""), zaptest.NewLogger(t).Sugar()) }()
+	go func() { served <- ServeListen(ctx, ln, eng, zaptest.NewLogger(t).Sugar()) }()
 
 	if err := queryUsersOverSocket(t, path, "any-token"); err != nil {
 		t.Fatal(err)
