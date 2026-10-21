@@ -1,7 +1,6 @@
 package engine_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -31,15 +30,17 @@ INSERT INTO app.main.audit_log VALUES (1, 'login');
 `
 
 const permsYAML = `
-tables:
-  app.users:
-    key: [id]
-    select: true
-    insert: true
-    update: true
-    delete: true
-  app.audit_log:
-    select: true
+catalogs:
+  app:
+    tables:
+      main.users:
+        primary_key: [id]
+        select: true
+        insert: true
+        update: true
+        delete: true
+      main.audit_log:
+        select: true
 `
 
 // open builds an engine from the fixtures above, skipping when the extensions
@@ -317,7 +318,7 @@ func TestWithoutLockdownFileAccessStillWorks(t *testing.T) {
 }
 
 // openFails is the negative half of open: a schema and perms.yml that must not
-// produce a running engine.
+// boot.
 func openFails(t *testing.T, schema, permsYML string) error {
 	t.Helper()
 	if os.Getenv(engine.ExtensionDirEnv) == "" {
@@ -326,19 +327,14 @@ func openFails(t *testing.T, schema, permsYML string) error {
 
 	dir := t.TempDir()
 	schemaPath := filepath.Join(dir, "schema.sql")
-	permsPath := filepath.Join(dir, "perms.yml")
 	if err := os.WriteFile(schemaPath, []byte(schema), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(permsPath, []byte(permsYML), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	rules, err := perms.Load(permsPath)
+	rules, err := perms.Parse([]byte(permsYML))
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng, err := engine.Open(context.Background(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	eng, err := engine.Open(t.Context(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, zaptest.NewLogger(t).Sugar())
 	if err == nil {
 		_ = eng.Close()
 		t.Fatal("engine opened despite an invalid configuration")
@@ -349,32 +345,42 @@ func openFails(t *testing.T, schema, permsYML string) error {
 func TestMissingTableFailsAtStartup(t *testing.T) {
 	// The schema omits audit_log, which perms.yml still names.
 	err := openFails(t, "ATTACH ':memory:' AS app;\nCREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);", permsYAML)
-	t.Logf("refused as expected: %v", err)
+	if !strings.Contains(err.Error(), "main.audit_log") {
+		t.Errorf("got %v, want an error naming main.audit_log", err)
+	}
 }
 
-// resolvePrimaryKey refuses an updatable table with no key, so Open fails.
-func TestWritableTableWithoutPrimaryKeyFailsAtStartup(t *testing.T) {
+func TestWritableTableWithoutPrimaryKeyRefusesWrites(t *testing.T) {
 	const schema = `ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`
 	const rules = `
-tables:
-  app.events:
-    select: true
-    insert: true
-    update: true
-    delete: true
+catalogs:
+  app:
+    tables:
+      main.events:
+        select: true
+        insert: true
+        update: true
+        delete: true
 `
-	err := openFails(t, schema, rules)
-	if !strings.Contains(err.Error(), "no primary key") {
-		t.Errorf("got %v, want a missing primary key error", err)
+	db := newSession(t, openWith(t, schema, rules)).DB()
+	for _, stmt := range []string{
+		`UPDATE app.main.events SET action = 'x' WHERE id = 1`,
+		`DELETE FROM app.main.events WHERE id = 1`,
+	} {
+		if _, err := db.ExecContext(t.Context(), stmt); err == nil || !strings.Contains(err.Error(), "has no key") {
+			t.Errorf("%s: got %v, want a missing key error", stmt, err)
+		}
 	}
 }
 
 func TestInsertOnlyTableNeedsNoPrimaryKey(t *testing.T) {
 	session := newSession(t, openWith(t,
 		`ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`, `
-tables:
-  app.events:
-    insert: true
+catalogs:
+  app:
+    tables:
+      main.events:
+        insert: true
 `))
 	if _, err := session.DB().ExecContext(t.Context(),
 		`INSERT INTO app.main.events VALUES (1, 'login')`); err != nil {
@@ -392,12 +398,14 @@ ATTACH ':memory:' AS app;
 CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, status VARCHAR, amount INTEGER);
 INSERT INTO app.main.orders VALUES (1, 'open', 10), (2, 'closed', 20), (3, 'deleted', 30);
 `, `
-tables:
-  app.orders:
-    select: "status <> 'deleted'"
-    insert: "amount > 0"
-    update: { using: "status = 'open'", check: "amount > 0" }
-    delete: "status = 'closed'"
+catalogs:
+  app:
+    tables:
+      main.orders:
+        select: "status <> 'deleted'"
+        insert: "amount > 0"
+        update: { using: "status = 'open'", check: "amount > 0" }
+        delete: "status = 'closed'"
 `))
 	db := session.DB()
 	exec := func(stmt string) (int64, error) {
@@ -445,9 +453,11 @@ ATTACH ':memory:' AS app;
 CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, owner VARCHAR);
 INSERT INTO app.main.orders VALUES (1, 'alice'), (2, 'bob'), (3, 'alice');
 `, `
-tables:
-  app.orders:
-    select: "owner = $sub"
+catalogs:
+  app:
+    tables:
+      main.orders:
+        select: "owner = $sub"
 `)
 	log := zaptest.NewLogger(t).Sugar()
 	session, err := eng.OpenSession(t.Context(), log)
@@ -478,9 +488,11 @@ func TestPolicyWithUnsetContextFailsToAdmit(t *testing.T) {
 ATTACH ':memory:' AS app;
 CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, owner VARCHAR);
 `, `
-tables:
-  app.orders:
-    select: "owner = $sub"
+catalogs:
+  app:
+    tables:
+      main.orders:
+        select: "owner = $sub"
 `)
 	if _, err := eng.NewSession(t.Context(), zaptest.NewLogger(t).Sugar()); err == nil || !strings.Contains(err.Error(), "$sub") {
 		t.Errorf("got %v, want an error naming $sub", err)
@@ -490,13 +502,15 @@ tables:
 func TestPrimaryKeyOverrideWithUnknownColumnFailsAtStartup(t *testing.T) {
 	const schema = `ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`
 	const rules = `
-tables:
-  app.events:
-    key: [event_id]
-    select: true
-    insert: true
-    update: true
-    delete: true
+catalogs:
+  app:
+    tables:
+      main.events:
+        primary_key: [event_id]
+        select: true
+        insert: true
+        update: true
+        delete: true
 `
 	err := openFails(t, schema, rules)
 	if !strings.Contains(err.Error(), "event_id") {
@@ -506,39 +520,17 @@ tables:
 
 // A writable table whose key is declared in the schema needs no override.
 func TestDiscoveredPrimaryKeyNeedsNoOverride(t *testing.T) {
-	if os.Getenv(engine.ExtensionDirEnv) == "" {
-		t.Skipf("%s not set", engine.ExtensionDirEnv)
-	}
-
-	dir := t.TempDir()
-	schemaPath := filepath.Join(dir, "schema.sql")
-	permsPath := filepath.Join(dir, "perms.yml")
-	if err := os.WriteFile(schemaPath,
-		[]byte("ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER PRIMARY KEY, action VARCHAR);"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(permsPath, []byte(`
-tables:
-  app.events:
-    select: true
-    insert: true
-    update: true
-    delete: true
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	rules, err := perms.Load(permsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	eng, err := engine.Open(t.Context(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, zaptest.NewLogger(t).Sugar())
-	if err != nil {
-		t.Fatalf("open engine: %v", err)
-	}
-	if err := eng.Close(); err != nil {
-		t.Errorf("close engine: %v", err)
-	}
+	newSession(t, openWith(t,
+		"ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER PRIMARY KEY, action VARCHAR);", `
+catalogs:
+  app:
+    tables:
+      main.events:
+        select: true
+        insert: true
+        update: true
+        delete: true
+`))
 }
 
 func TestBridgeSpansSchemasInOneCatalog(t *testing.T) {
@@ -560,14 +552,16 @@ INSERT INTO app.sales.orders VALUES (1, 10), (2, 20);
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(permsPath, []byte(`
-tables:
-  app.main.users:
-    select: true
-  app.sales.orders:
-    select: true
-    insert: true
-    update: true
-    delete: true
+catalogs:
+  app:
+    tables:
+      main.users:
+        select: true
+      sales.orders:
+        select: true
+        insert: true
+        update: true
+        delete: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/zap"
 
 	"github.com/n6k-io/n6kd/engine"
@@ -24,6 +25,8 @@ const shutdownGrace = 10 * time.Second
 type Config struct {
 	Addr           string
 	AllowedOrigins []string
+	// MCP, when set, is served on each websocket's text frames to clients that offer `mcp`.
+	MCP *mcp.Server
 }
 
 func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLogger) error {
@@ -120,7 +123,7 @@ func newRouter(cfg Config, eng *engine.Engine, log *zap.SugaredLogger) http.Hand
 	})
 
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWS(w, r, upgrader, eng, log)
+		serveWS(w, r, upgrader, eng, cfg.MCP, log)
 	})
 
 	return r

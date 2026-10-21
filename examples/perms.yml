@@ -1,17 +1,18 @@
-# Each key names a table as the server has it: catalog.table (schema defaults to
-# main) or catalog.schema.table. It is served under that same name, so a client
-# reaches it as <alias>.main.users after
-# ATTACH 'n6k://host' AS <alias> (TYPE n6k, CATALOG 'app').
-# This is the complete list: an unlisted table does not exist for clients, and
-# an unlisted verb is denied.
-tables:
-  app.main.users:
-    # Only needed where the bridge cannot discover the primary key itself.
-    key: [id]
-    select: true
-    insert: true
-    update: true
-    delete: true
+# Each catalog is served under its own name, so a client reaches its tables as
+# <alias>.main.users after ATTACH 'n6k://host' AS <alias> (TYPE n6k, CATALOG 'app').
+# Its value is a virtual_catalog_bridge policy document, passed to
+# bridge_configure_policy as written. This is the complete list: an unlisted
+# table does not exist for clients, and an unlisted verb is denied.
+catalogs:
+  app:
+    tables:
+      main.users:
+        # Only needed where the bridge cannot discover the primary key itself.
+        primary_key: [id]
+        select: true
+        insert: true
+        update: true
+        delete: true
 
-  app.main.audit_log:
-    select: true
+      main.audit_log:
+        select: true

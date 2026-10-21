@@ -2,15 +2,18 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
 	"github.com/n6k-io/n6kd/auth"
 	"github.com/n6k-io/n6kd/engine"
+	"github.com/n6k-io/n6kd/internal/sqlquote"
 )
 
 type authFlags struct {
@@ -51,19 +54,26 @@ func newAuthCmd() *cobra.Command {
 }
 
 func newLoginCmd() *cobra.Command {
-	var issuer, clientID, resource string
+	var issuer, clientID, resource, server, apiKey string
 	var debugLogs, jsonLogs bool
 
 	cmd := &cobra.Command{
-		Use:   "login --issuer URL [--client-id ID] [--resource AUD]",
-		Short: "Log in with n6k_login and store the persistent n6k_refresh secret",
-		Long: "Runs n6k_login, the n6k_client device login, which stores a persistent\n" +
-			"n6k_refresh secret. n6kd mcp mints its connect token from that secret.",
+		Use:   "login (--issuer URL [--client-id ID] [--resource AUD] | --server URL --api-key KEY)",
+		Short: "Store the persistent secret n6kd mcp connects with",
+		Long: "With --issuer, runs n6k_login, the n6k_client device login, which stores a persistent\n" +
+			"n6k_refresh secret; n6kd mcp mints its connect token from that secret for every server.\n" +
+			"With --server and --api-key, stores that key as a persistent n6k secret scoped to the\n" +
+			"server's host:port, which n6kd mcp presents to that server as is.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
-			if issuer == "" {
-				return errors.New("--issuer is required")
+			switch {
+			case issuer != "" && (server != "" || apiKey != ""):
+				return errors.New("--issuer cannot be used with --server or --api-key")
+			case issuer == "" && (server == "") != (apiKey == ""):
+				return errors.New("--server and --api-key must be given together")
+			case issuer == "" && server == "":
+				return errors.New("--issuer, or --server with --api-key, is required")
 			}
 
 			log, err := installLogger(debugLogs, jsonLogs)
@@ -77,6 +87,10 @@ func newLoginCmd() *cobra.Command {
 				return err
 			}
 			defer func() { _ = db.Close() }()
+
+			if server != "" {
+				return storeAPIKey(cmd, db, server, apiKey)
+			}
 
 			query := "SELECT status, detail FROM n6k_login(?"
 			args := []any{issuer}
@@ -101,8 +115,27 @@ func newLoginCmd() *cobra.Command {
 	cmd.Flags().StringVar(&clientID, "client-id", os.Getenv("N6KD_AUTH_CLIENT_ID"), "client ID (n6k_login default when unset)")
 	cmd.Flags().StringVar(&resource, "resource", os.Getenv("N6KD_AUTH_RESOURCE"),
 		"audience of the minted token; the server's --oidc-audience")
+	cmd.Flags().StringVar(&server, "server", "", "n6k server WebSocket endpoint the --api-key is for, as ws://host:port/ws")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "the server's --api-key")
 	cmd.Flags().BoolVar(&debugLogs, "debug", os.Getenv("N6KD_DEBUG") != "", "log extension detail")
 	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
 		"log JSON lines with Cloud Logging severity fields, for log collectors")
 	return cmd
 }
+
+func storeAPIKey(cmd *cobra.Command, db *sql.DB, server, apiKey string) error {
+	scope, err := serverScope(server)
+	if err != nil {
+		return err
+	}
+	name := "n6kd_" + unsafeSecretChars.ReplaceAllString(scope, "_")
+	stmt := fmt.Sprintf("CREATE OR REPLACE PERSISTENT SECRET %s (TYPE n6k, TOKEN %s, SCOPE %s)",
+		sqlquote.Ident(name), sqlquote.String(apiKey), sqlquote.String(scope))
+	if _, err := db.ExecContext(cmd.Context(), stmt); err != nil {
+		return fmt.Errorf("store the key for %s: %w", scope, err)
+	}
+	_, err = fmt.Fprintf(cmd.ErrOrStderr(), "stored: persistent n6k secret %s for %s\n", name, scope)
+	return err
+}
+
+var unsafeSecretChars = regexp.MustCompile(`[^A-Za-z0-9_]`)

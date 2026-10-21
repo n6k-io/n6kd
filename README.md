@@ -25,6 +25,13 @@ n6kd -f schema.sql --perms perms.yml
 Boot SQL is run in the order given by `-f` (file) and `-c` (statement). Without
 `--perms`, every catalog in the loaded database is served read/write, unbridged.
 
+With `--listen=<path>` (or `N6K_LISTEN=<path>`), n6kd listens on that Unix
+socket instead of `--addr` and serves every client that connects, each in its
+own session, in n6k stream framing. A stale socket file is replaced, one a live
+server holds is refused, and the file is mode 0600 and removed on exit. The
+dialing parent authenticates; the HELLO token is not checked, and `--api-key` /
+`--oidc-*` are refused at startup.
+
 ### Flags
 
 | Flag | Description |
@@ -33,12 +40,14 @@ Boot SQL is run in the order given by `-f` (file) and `-c` (statement). Without
 | `-c, --command` | SQL run at boot; repeatable |
 | `--perms` | perms.yml naming the catalogs to serve bridged |
 | `--addr` | listen address (default `:8080`, or `$PORT`) |
+| `--listen` | Unix socket to listen on instead of `--addr` (`N6K_LISTEN`) |
 | `--api-key` | token clients must present (`N6KD_API_KEY`) |
 | `--oidc-issuer-url` | OIDC issuer whose JWTs clients must present (`N6KD_OIDC_ISSUER_URL`); not with `--api-key` |
 | `--oidc-audience` | `aud` claim a client's JWT must carry (`N6KD_OIDC_AUDIENCE`); required with `--oidc-issuer-url` |
 | `--load-dotenv[=path]` | load environment variables from `.env` (or `path`) first; variables already set win |
 | `--allow-origin` | browser origins allowed to connect; repeatable, default any (`N6KD_ALLOW_ORIGIN`, comma-separated) |
 | `--lockdown` / `--no-lockdown` | deny served connections filesystem and extension access |
+| `--memory-limit` / `--threads` | locked in by `--lockdown`, per session database; default DuckDB's (`N6KD_MEMORY_LIMIT`, `N6KD_THREADS`) |
 | `--boot-only` | run the boot SQL, then exit without serving |
 | `--debug` | per-connection and per-catalog logging |
 | `--json-logging` | JSON logs with Cloud Logging severity fields |
@@ -51,40 +60,43 @@ Boot SQL is run in the order given by `-f` (file) and `-c` (statement). Without
 ## perms.yml
 
 ```yaml
-tables:
-  app.users:
-    key: [id]
-    select: true
-    insert: true
-    update: true
-    delete: true
+catalogs:
+  app:
+    tables:
+      main.users:
+        primary_key: [id]
+        select: true
+        insert: true
+        update: true
+        delete: true
 
-  app.audit_log:
-    select: true
+      main.audit_log:
+        select: true
 
-  app.orders:
-    select: "status <> 'deleted'"
-    insert: "amount > 0"
-    update: { using: "status = 'open'", check: "amount > 0" }
-    delete: "status = 'closed'"
+      main.orders:
+        select: "status <> 'deleted'"
+        insert: "amount > 0"
+        update: { using: "status = 'open'", check: "amount > 0" }
+        delete: "status = 'closed'"
 ```
 
-`select`, `insert`, and `delete` accept `true` or a SQL predicate; `update`
-accepts `true` or a `{using, check}` map. All policies are enforced by
-`virtual_catalog_bridge`, and an unlisted verb is denied.
+Each catalog's value is a `virtual_catalog_bridge` policy document, passed to
+`bridge_configure_policy` as written; `policy_version` defaults to `1`. See the
+bridge's `docs/policy-v1.schema.json` for every setting (`schemas`, `functions`,
+`foreign_keys`, ...). The bridge validates the document when a client connects,
+and an unlisted verb is denied.
 
 | Verb | Value |
 | --- | --- |
 | `select` | `true` or a `USING` predicate: rows a client can see |
 | `insert` | `true` or a `WITH CHECK` predicate: rows a client can add |
-| `update` | `true` or `{using, check}`: rows a client can change, and what they may become |
+| `update` | `true`, a predicate, or `{using, check}`: rows a client can change, and what they may become |
 | `delete` | `true` or a `USING` predicate: rows a client can remove |
 
-`update` and `delete` need a primary key. `key` overrides it where the bridge
-cannot discover one from the schema.
+`update` and `delete` need a primary key. `primary_key` overrides it where the
+bridge cannot discover one from the schema.
 
-Each table key names a table as the server has it — `catalog.table` (schema
-defaults to `main`) or `catalog.schema.table` — and it is served under that same name:
+Each catalog is served under its own name:
 
 ```sql
 ATTACH 'n6k://localhost:8080' AS eggs (TYPE n6k, CATALOG 'app');
@@ -115,10 +127,12 @@ predicates as `$name` — `$sub`, `$iss`, `$exp`, `$email`, and any custom
 claim. Array and object claims are left out, and so is `aud` when it is a list.
 
 ```yaml
-tables:
-  app.orders:
-    select: "owner = $sub"
-    insert: "owner = $sub"
+catalogs:
+  app:
+    tables:
+      main.orders:
+        select: "owner = $sub"
+        insert: "owner = $sub"
 ```
 
 Values are bound as typed constants, never spliced into the SQL. A predicate

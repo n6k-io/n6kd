@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 
 	"go.uber.org/zap"
+
+	"github.com/n6k-io/n6kd/internal/sqlquote"
 )
 
 func openWithExtensions(ctx context.Context, extensions []string, log *zap.SugaredLogger) (*sql.DB, error) {
@@ -21,7 +23,7 @@ func openWithExtensions(ctx context.Context, extensions []string, log *zap.Sugar
 		if err != nil {
 			return nil, errors.Join(err, db.Close())
 		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("LOAD %s", quoteString(target))); err != nil {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("LOAD %s", sqlquote.String(target))); err != nil {
 			return nil, errors.Join(fmt.Errorf("load %s: %w", name, err), db.Close())
 		}
 		log.Debugf("loaded extension %s from %s", name, target)
