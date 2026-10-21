@@ -5,20 +5,16 @@
 //
 // The mechanism is a socketpair. We keep one end; the *number* of the other is
 // passed into SQL, which the extension dup()s and then treats as its client
-// connection. On the wire a WebSocket binary message maps to one length-prefixed
-// record, 4-byte big-endian, in both directions.
+// connection. On the wire a WebSocket message maps to one stream-framed record
+// (see pump.go), in both directions.
 
 package server
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -31,13 +27,14 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/zap"
 
 	"github.com/n6k-io/n6kd/engine"
+	"github.com/n6k-io/n6kd/internal/sqlquote"
+	"github.com/n6k-io/n6kd/internal/streamframe"
+	"github.com/n6k-io/n6kd/internal/wstext"
 )
-
-// Bounds a corrupt length prefix from the extension; far above any real frame.
-const maxFrameBytes = 1 << 30
 
 // How long the serving CALL gets to unwind after the socket drops. Above the
 // reactor's own 5s drain of in-flight queries, which this has to outlast.
@@ -59,7 +56,7 @@ func newUpgrader(origins []string) *websocket.Upgrader {
 // Live sessions, reported in the connect and disconnect lines.
 var activeSessions atomic.Int64
 
-func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrader, eng *engine.Engine, log *zap.SugaredLogger) {
+func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrader, eng *engine.Engine, mcpServer *mcp.Server, log *zap.SugaredLogger) {
 	// The last 6 of chi's request id, to tell concurrent clients apart in the log.
 	client := r.RemoteAddr
 	if id := middleware.GetReqID(r.Context()); len(id) >= 6 {
@@ -71,7 +68,7 @@ func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrade
 		log.Errorf("client %s failed to upgrade to a websocket: %v", client, err)
 		return
 	}
-	ws.SetReadLimit(maxFrameBytes)
+	ws.SetReadLimit(streamframe.MaxBytes)
 	closer := &wsCloser{ws: ws, log: log.Named(client)}
 	defer func() { closer.finish(err) }()
 
@@ -84,9 +81,9 @@ func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrade
 	started := time.Now()
 	// Named rather than prefixed by hand, so the session and engine lines below
 	// carry the client without threading a string through every call.
-	err = serveSession(r.Context(), closer, eng, log.Named(client), &counts)
+	err = serveSession(r.Context(), closer, eng, mcpServer, log.Named(client), &counts)
 	elapsed := time.Since(started).Round(time.Millisecond)
-	if errors.Is(err, errUnauthorized) {
+	if errors.Is(err, engine.ErrUnauthorized) {
 		log.Infof("client %s rejected: %v — %d still connected", client, err, activeSessions.Load()-1)
 		return
 	}
@@ -124,8 +121,10 @@ type counters struct {
 
 // serveSession owns one client for its whole life: a private bridged database,
 // a socketpair, and the blocking CALL that serves it.
-func serveSession(ctx context.Context, closer *wsCloser, eng *engine.Engine, log *zap.SugaredLogger, counts *counters) (err error) {
+func serveSession(ctx context.Context, closer *wsCloser, eng *engine.Engine, mcpServer *mcp.Server, log *zap.SugaredLogger, counts *counters) (err error) {
 	ws := closer.ws
+	text := wstext.New(ws)
+	defer func() { _ = text.Close() }()
 	session, err := eng.OpenSession(ctx, log)
 	if err != nil {
 		return fmt.Errorf("open session: %w", err)
@@ -173,10 +172,21 @@ func serveSession(ctx context.Context, closer *wsCloser, eng *engine.Engine, log
 		err = errors.Join(err, conn.Close())
 	}()
 
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- admitAndServe(ctx, conn, eng, session, extFD, log) }()
+	var mcpGranted *atomic.Bool
+	if mcpServer != nil {
+		mcpSession, err := mcpServer.Connect(ctx, text, nil)
+		if err != nil {
+			return fmt.Errorf("start mcp session: %w", err)
+		}
+		defer func() { _ = mcpSession.Close() }()
+		mcpGranted = new(atomic.Bool)
+	}
 
-	pumpErr, served := pumpUntilEitherEnds(ws, host, serveDone, counts)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- admitAndServe(ctx, conn, eng, session, extFD, text, mcpGranted, log) }()
+
+	pumpErr, served := pumpUntilEitherEnds(ws, text, mcpGranted, host, serveDone, counts)
+	_ = text.Close()
 
 	// Closing our end EOFs the extension's, which ends its reader loop and returns
 	// the CALL the select below waits on.
@@ -206,12 +216,12 @@ func serveSession(ctx context.Context, closer *wsCloser, eng *engine.Engine, log
 // The CALL is watched alongside the two directions so a rejected fd ends the
 // connection with that error instead of leaving both sides blocked on a peer
 // that will never speak.
-func pumpUntilEitherEnds(ws *websocket.Conn, host *os.File, serveDone <-chan error, counts *counters) (err error, served bool) {
+func pumpUntilEitherEnds(ws *websocket.Conn, text *wstext.Conn, mcpGranted *atomic.Bool, host *os.File, serveDone <-chan error, counts *counters) (err error, served bool) {
 	toSock := make(chan error, 1)
-	go func() { toSock <- wsToSock(ws, host, counts) }()
+	go func() { toSock <- wsToSock(ws, text, mcpGranted, host, counts) }()
 
 	toWS := make(chan error, 1)
-	go func() { toWS <- sockToWS(ws, host, counts) }()
+	go func() { toWS <- sockToWS(text, host, counts) }()
 
 	select {
 	case err := <-toSock:
@@ -219,11 +229,7 @@ func pumpUntilEitherEnds(ws *websocket.Conn, host *os.File, serveDone <-chan err
 	case err := <-toWS:
 		return err, false
 	case err := <-serveDone:
-		if errors.Is(err, errUnauthorized) {
-			select {
-			case <-toWS:
-			case <-time.After(time.Second):
-			}
+		if errors.Is(err, engine.ErrUnauthorized) {
 			return err, true
 		}
 		if err != nil {
@@ -232,8 +238,6 @@ func pumpUntilEitherEnds(ws *websocket.Conn, host *os.File, serveDone <-chan err
 		return nil, true
 	}
 }
-
-var errUnauthorized = engine.ErrUnauthorized
 
 type wsCloser struct {
 	ws   *websocket.Conn
@@ -253,7 +257,7 @@ func (c *wsCloser) finish(err error) {
 
 func closeFrame(err error) (int, string) {
 	switch {
-	case errors.Is(err, errUnauthorized):
+	case errors.Is(err, engine.ErrUnauthorized):
 		return websocket.ClosePolicyViolation, err.Error()
 	case err != nil:
 		return websocket.CloseInternalServerErr, err.Error()
@@ -261,107 +265,62 @@ func closeFrame(err error) (int, string) {
 	return websocket.CloseNormalClosure, ""
 }
 
-func admitAndServe(ctx context.Context, conn *sql.Conn, eng *engine.Engine, session *engine.Session, fd int, log *zap.SugaredLogger) error {
+// mcpGranted is nil when this server has no MCP; otherwise it is set once the
+// client is admitted and offered `mcp`, and until then text frames are dropped.
+func admitAndServe(ctx context.Context, conn *sql.Conn, eng *engine.Engine, session *engine.Session, fd int, text *wstext.Conn, mcpGranted *atomic.Bool, log *zap.SugaredLogger) error {
 	blocking := context.WithoutCancel(ctx)
 
 	var token string
+	var offersMCP bool
 	if err := conn.QueryRowContext(blocking,
-		fmt.Sprintf("SELECT token FROM n6k_handshake(%d)", fd)).Scan(&token); err != nil {
+		fmt.Sprintf("SELECT token, list_contains(capabilities, 'mcp') FROM n6k_handshake(%d)", fd)).Scan(&token, &offersMCP); err != nil {
 		return fmt.Errorf("handshake: %w", err)
 	}
 	claims, err := eng.Authenticate(ctx, token)
 	if err != nil {
 		log.Debugf("token refused: %v", err)
-		if _, rejectErr := conn.ExecContext(blocking,
-			fmt.Sprintf("CALL n6k_reject(%d, '%s')", fd, errUnauthorized)); rejectErr != nil {
-			return errors.Join(errUnauthorized, fmt.Errorf("reject: %w", rejectErr))
+		var frame []byte
+		if rejectErr := conn.QueryRowContext(blocking,
+			"SELECT frame FROM n6k_reject(?)", engine.ErrUnauthorized.Error()).Scan(&frame); rejectErr != nil {
+			return errors.Join(engine.ErrUnauthorized, fmt.Errorf("reject: %w", rejectErr))
 		}
-		return errUnauthorized
+		if sendErr := text.WriteMessage(websocket.BinaryMessage, frame); sendErr != nil {
+			log.Debugf("sending HELLO_ERR failed: %v", sendErr)
+		}
+		return engine.ErrUnauthorized
 	}
 
+	grantMCP := mcpGranted != nil && offersMCP
+	return admitAndCall(ctx, conn, eng, session, fd, claims, grantMCP, func() { mcpGranted.Store(true) }, log)
+}
+
+// onGranted runs between admission and the CALL, and only when grantMCP is set.
+func admitAndCall(ctx context.Context, conn *sql.Conn, eng *engine.Engine, session *engine.Session, fd int,
+	claims map[string]any, grantMCP bool, onGranted func(), log *zap.SugaredLogger,
+) error {
 	if err := eng.Admit(ctx, session, claims, log); err != nil {
 		return err
 	}
-
+	if grantMCP {
+		onGranted()
+	}
 	log.Debugf("handing fd %d to the reactor", fd)
-	_, err = conn.ExecContext(blocking, serveStatement(fd, eng.Catalogs()))
+	_, err := conn.ExecContext(context.WithoutCancel(ctx), serveStatement(fd, eng.Catalogs(), grantMCP))
 	log.Debugf("the reactor returned the fd (err: %v)", err)
 	return err
 }
 
-func serveStatement(fd int, catalogs []string) string {
+func serveStatement(fd int, catalogs []string, grantMCP bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CALL n6k_serve_fd(%d", fd)
 	for _, c := range catalogs {
-		fmt.Fprintf(&b, ", '%s'", strings.ReplaceAll(c, "'", "''"))
+		fmt.Fprintf(&b, ", %s", sqlquote.String(c))
+	}
+	if grantMCP {
+		b.WriteString(", capabilities => ['mcp'], app_capabilities => ['mcp']")
 	}
 	b.WriteString(")")
 	return b.String()
-}
-
-func wsToSock(ws *websocket.Conn, host *os.File, counts *counters) error {
-	var header [4]byte
-	for {
-		messageType, payload, err := ws.ReadMessage()
-		if err != nil {
-			// A client going away — cleanly, or by dropping the connection — is an
-			// ordinary end of stream, and so is our own teardown closing this socket
-			// out from under the read. Anything else is a real failure to report.
-			if websocket.IsCloseError(err,
-				websocket.CloseNormalClosure,
-				websocket.CloseGoingAway,
-				websocket.CloseNoStatusReceived,
-				websocket.CloseAbnormalClosure,
-			) || errors.Is(err, net.ErrClosed) {
-				return nil
-			}
-			return err
-		}
-		if messageType != websocket.BinaryMessage {
-			continue
-		}
-		// SetReadLimit already caps this; the check keeps the conversion below
-		// provably in range rather than relying on a setting made elsewhere.
-		if len(payload) > maxFrameBytes {
-			return fmt.Errorf("client frame of %d bytes exceeds the %d byte limit", len(payload), maxFrameBytes)
-		}
-		// #nosec G115 -- the check above bounds this by maxFrameBytes (1<<30).
-		binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
-		if _, err := host.Write(header[:]); err != nil {
-			return err
-		}
-		if _, err := host.Write(payload); err != nil {
-			return err
-		}
-		counts.framesIn.Add(1)
-		counts.bytesIn.Add(int64(len(payload)))
-	}
-}
-
-func sockToWS(ws *websocket.Conn, host *os.File, counts *counters) error {
-	reader := bufio.NewReader(host)
-	var header [4]byte
-	for {
-		if _, err := io.ReadFull(reader, header[:]); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return nil // the extension closed
-			}
-			return err
-		}
-		size := binary.BigEndian.Uint32(header[:])
-		if size > maxFrameBytes {
-			return fmt.Errorf("frame of %d bytes exceeds the %d byte limit", size, maxFrameBytes)
-		}
-		payload := make([]byte, size)
-		if _, err := io.ReadFull(reader, payload); err != nil {
-			return err
-		}
-		if err := ws.WriteMessage(websocket.BinaryMessage, payload); err != nil {
-			return err
-		}
-		counts.framesOut.Add(1)
-		counts.bytesOut.Add(int64(size))
-	}
 }
 
 // closeWith sends a close frame, truncated to the 123 bytes RFC 6455 allows.

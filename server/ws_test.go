@@ -35,15 +35,17 @@ INSERT INTO app.main.audit_log VALUES (1, 'login');
 `
 
 const permsYAML = `
-tables:
-  app.users:
-    key: [id]
-    select: true
-    insert: true
-    update: true
-    delete: true
-  app.audit_log:
-    select: true
+catalogs:
+  app:
+    tables:
+      main.users:
+        primary_key: [id]
+        select: true
+        insert: true
+        update: true
+        delete: true
+      main.audit_log:
+        select: true
 `
 
 // newTestServer serves the fixtures above over the real /ws route.
@@ -101,6 +103,13 @@ func newDirectTestServer(t *testing.T) *httptest.Server {
 
 func newDirectTestServerWithKey(t *testing.T, apiKey string) *httptest.Server {
 	t.Helper()
+	srv := httptest.NewServer(newRouter(Config{}, newDirectEngine(t, apiKey), zaptest.NewLogger(t).Sugar()))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func newDirectEngine(t *testing.T, apiKey string) *engine.Engine {
+	t.Helper()
 	if os.Getenv(engine.ExtensionDirEnv) == "" {
 		t.Skipf("%s not set", engine.ExtensionDirEnv)
 	}
@@ -120,10 +129,7 @@ func newDirectTestServerWithKey(t *testing.T, apiKey string) *httptest.Server {
 			t.Errorf("close engine: %v", err)
 		}
 	})
-
-	srv := httptest.NewServer(newRouter(Config{}, eng, log))
-	t.Cleanup(srv.Close)
-	return srv
+	return eng
 }
 
 func TestDirectModeOverWebSocket(t *testing.T) {
@@ -216,7 +222,10 @@ func TestAPIKeyRejectsWrongToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("attach with the wrong token succeeded")
 	}
-	t.Logf("rejected as expected: %v", err)
+	// Only the HELLO_ERR carries the exception type; the close frame alone does not.
+	if !strings.Contains(err.Error(), "InvalidInputException: unauthorized") {
+		t.Fatalf("got %v, want the HELLO_ERR reason", err)
+	}
 }
 
 // Direct mode registers the verifier on the shared source rather than on a
@@ -440,9 +449,11 @@ INSERT INTO app.main.orders VALUES (1, 'alice'), (2, 'bob'), (3, 'alice');
 		t.Fatal(err)
 	}
 	rules, err := perms.Parse([]byte(`
-tables:
-  app.orders:
-    select: "owner = $sub"
+catalogs:
+  app:
+    tables:
+      main.orders:
+        select: "owner = $sub"
 `))
 	if err != nil {
 		t.Fatal(err)

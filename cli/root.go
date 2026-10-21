@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 
 	"github.com/n6k-io/n6kd/engine"
+	"github.com/n6k-io/n6kd/internal/textfmt"
 	"github.com/n6k-io/n6kd/perms"
 	"github.com/n6k-io/n6kd/server"
 )
@@ -36,8 +36,11 @@ func newRootCmd() *cobra.Command {
 	var permsPath string
 	var authn authFlags
 	var lockdown, noLockdown bool
+	var memoryLimit string
+	var threads int
 	var debug, jsonLogs bool
 	var bootOnly bool
+	var listenPath string
 
 	var boot []engine.Step
 
@@ -47,7 +50,9 @@ func newRootCmd() *cobra.Command {
 		Long: "Runs the -f files and -c statements, in the order given, into a DuckDB\n" +
 			"database and serves the catalogs named in --perms to WebSocket clients.\n\n" +
 			"With no perms.yml at all, clients are served from the loaded database\n" +
-			"directly: every catalog it holds, read and write, unbridged.",
+			"directly: every catalog it holds, read and write, unbridged.\n\n" +
+			"With --listen (N6K_LISTEN), listens on that Unix socket instead and serves\n" +
+			"every client that connects, trusting the parent that dials in.",
 		Args: cobra.NoArgs,
 		// Named return so the deferred close can report a failure to flush or
 		// release the database rather than drop it.
@@ -61,6 +66,11 @@ func newRootCmd() *cobra.Command {
 					return fmt.Errorf("--lockdown and --no-lockdown contradict each other")
 				}
 				lockdown = false
+			}
+			if env := os.Getenv("N6KD_THREADS"); env != "" && !cmd.Flags().Changed("threads") {
+				if threads, err = strconv.Atoi(env); err != nil {
+					return fmt.Errorf("N6KD_THREADS: %w", err)
+				}
 			}
 
 			log, err := installLogger(debug, jsonLogs)
@@ -88,9 +98,15 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 
-			// All of this runs before server.Run binds the listener, so a bad schema
+			// All of this runs before server.Run binds the TCP listener, so a bad schema
 			// or a bad perms.yml fails the boot instead of the first request.
 			started := time.Now()
+
+			socket, err := openSocketMode(authn, listenPath)
+			if err != nil {
+				return err
+			}
+			defer func() { err = errors.Join(err, socket.close()) }()
 
 			var rules *perms.File
 			if permsPath == "" {
@@ -100,7 +116,7 @@ func newRootCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				log.Infof("loaded perms %s (%s)", permsPath, plural(len(rules.Catalogs), "catalog"))
+				log.Infof("loaded perms %s (%s)", permsPath, textfmt.Plural(len(rules.Catalogs), "catalog"))
 			}
 
 			if lockdown {
@@ -115,11 +131,13 @@ func newRootCmd() *cobra.Command {
 			}
 
 			eng, err := engine.Open(cmd.Context(), engine.Options{
-				Boot:     boot,
-				Perms:    rules,
-				APIKey:   authn.apiKey,
-				Verifier: verifier,
-				Lockdown: lockdown,
+				Boot:        boot,
+				Perms:       rules,
+				APIKey:      authn.apiKey,
+				Verifier:    verifier,
+				Lockdown:    lockdown,
+				MemoryLimit: memoryLimit,
+				Threads:     threads,
 			}, log)
 			if err != nil {
 				return err
@@ -132,6 +150,9 @@ func newRootCmd() *cobra.Command {
 				return nil
 			}
 
+			if socket.serve != nil {
+				return socket.serve(cmd.Context(), eng, log)
+			}
 			return server.Run(cmd.Context(), cfg, eng, log)
 		},
 	}
@@ -145,6 +166,8 @@ func newRootCmd() *cobra.Command {
 		"SQL run into the source database at boot; repeatable, in order with -f")
 	cmd.Flags().StringVar(&permsPath, "perms", "", "perms.yml naming the catalogs to serve bridged")
 	cmd.Flags().StringVar(&cfg.Addr, "addr", defaultAddr(), "address to listen on")
+	cmd.Flags().StringVar(&listenPath, "listen", os.Getenv(server.ListenEnv),
+		"Unix socket to listen on instead of --addr, serving every client that connects; the parent dialing in authenticates")
 	cmd.Flags().StringSliceVar(&cfg.AllowedOrigins, "allow-origin", defaultAllowedOrigins(),
 		"browser origins allowed to connect (WebSocket handshake and CORS); repeatable, default any")
 	cmd.Flags().StringVar(&authn.apiKey, "api-key", os.Getenv("N6KD_API_KEY"),
@@ -156,6 +179,10 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&lockdown, "lockdown", os.Getenv("N6KD_NO_LOCKDOWN") == "",
 		"take the local filesystem and extension installation away from served connections")
 	cmd.Flags().BoolVar(&noLockdown, "no-lockdown", false, "the inverse of --lockdown")
+	cmd.Flags().StringVar(&memoryLimit, "memory-limit", os.Getenv("N6KD_MEMORY_LIMIT"),
+		"memory_limit locked in under --lockdown, per session database; default DuckDB's")
+	cmd.Flags().IntVar(&threads, "threads", 0,
+		"threads locked in under --lockdown, per session database (N6KD_THREADS); default DuckDB's")
 	cmd.Flags().BoolVar(&bootOnly, "boot-only", false,
 		"run the -f files and -c statements, then exit without binding the listener")
 	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-connection and per-catalog detail")
@@ -274,73 +301,6 @@ func defaultAllowedOrigins() []string {
 		return origins
 	}
 	return nil
-}
-
-func plural(n int, noun string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, noun)
-	}
-	return fmt.Sprintf("%d %ss", n, noun)
-}
-
-// gcpSeverity maps zap levels onto Cloud Logging's severity values, which is
-// what makes a JSON line render at the right level in the GCP console.
-func gcpSeverity(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
-	switch level {
-	case zapcore.DebugLevel:
-		enc.AppendString("DEBUG")
-	case zapcore.InfoLevel:
-		enc.AppendString("INFO")
-	case zapcore.WarnLevel:
-		enc.AppendString("WARNING")
-	case zapcore.ErrorLevel:
-		enc.AppendString("ERROR")
-	case zapcore.DPanicLevel:
-		enc.AppendString("CRITICAL")
-	case zapcore.PanicLevel:
-		enc.AppendString("ALERT")
-	default:
-		enc.AppendString("EMERGENCY")
-	}
-}
-
-func installLogger(debug, jsonLogs bool) (*zap.SugaredLogger, error) {
-	cfg := zap.NewDevelopmentConfig()
-	if jsonLogs {
-		cfg = zap.NewProductionConfig()
-		// Sampling drops repeats, which is wrong for an operator's log of record.
-		cfg.Sampling = nil
-		cfg.EncoderConfig.TimeKey = "time"
-		cfg.EncoderConfig.EncodeTime = zapcore.RFC3339NanoTimeEncoder
-		cfg.EncoderConfig.LevelKey = "severity"
-		cfg.EncoderConfig.EncodeLevel = gcpSeverity
-		cfg.EncoderConfig.MessageKey = "message"
-	}
-	if debug {
-		cfg.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
-	} else {
-		cfg.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
-	}
-	// The file:line of the log statement is noise for an operator; the message
-	// says where it came from. A stack trace on an error line is the same.
-	cfg.DisableCaller = true
-	cfg.DisableStacktrace = true
-	if !jsonLogs {
-		cfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05.000")
-	}
-	// stderr for both, so stdout stays free for anything a later subcommand
-	// wants to emit as data.
-	cfg.OutputPaths = []string{"stderr"}
-	cfg.ErrorOutputPaths = []string{"stderr"}
-
-	log, err := cfg.Build()
-	if err != nil {
-		return nil, err
-	}
-	// Installed globally too, so a package reaching for zap.L() rather than
-	// taking a logger still writes in the same format.
-	zap.ReplaceGlobals(log)
-	return log.Sugar(), nil
 }
 
 func requireExistingFiles(paths ...string) error {

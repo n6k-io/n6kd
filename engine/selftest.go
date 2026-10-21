@@ -20,15 +20,17 @@ INSERT INTO app.main.audit_log VALUES (1, 'login');
 `
 
 const selftestPerms = `
-tables:
-  app.users:
-    key: [id]
-    select: true
-    insert: true
-    update: true
-    delete: true
-  app.audit_log:
-    select: true
+catalogs:
+  app:
+    tables:
+      main.users:
+        primary_key: [id]
+        select: true
+        insert: true
+        update: true
+        delete: true
+      main.audit_log:
+        select: true
 `
 
 // SelfTest runs a whole engine against fixtures of its own: it loads the three

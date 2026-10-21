@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -13,7 +14,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/n6k-io/n6kd/perms"
+	"github.com/n6k-io/n6kd/internal/sqlquote"
+	"github.com/n6k-io/n6kd/internal/textfmt"
 )
 
 // Session is one client's view: its own database, carrying only the bridged
@@ -69,17 +71,17 @@ func (e *Engine) Admit(ctx context.Context, s *Session, values map[string]any, l
 		log.Debugf("bridged catalog %q for this client", name)
 	}
 	if e.opts.Lockdown {
-		if err := applyLockdown(ctx, s.db); err != nil {
+		if err := applyLockdown(ctx, s.db, e.opts); err != nil {
 			return err
 		}
 	}
 	log.Debugf("session ready with %s in %v",
-		plural(len(e.opts.Perms.Catalogs), "catalog"), time.Since(started).Round(time.Millisecond))
+		textfmt.Plural(len(e.opts.Perms.Catalogs), "catalog"), time.Since(started).Round(time.Millisecond))
 	return nil
 }
 
 // The token expires after 30s idle, so nothing slow may sit between register and ATTACH.
-func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, catalog perms.Catalog, values map[string]any) error {
+func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, policy json.RawMessage, values map[string]any) error {
 	bridgeID, err := newBridgeID()
 	if err != nil {
 		return err
@@ -99,28 +101,9 @@ func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, cat
 		}
 	}
 
-	for _, schemaName := range slices.Sorted(maps.Keys(catalog.Schemas)) {
-		schema := catalog.Schemas[schemaName]
-		for _, table := range slices.Sorted(maps.Keys(schema.Tables)) {
-			qualified := schemaName + "." + table
-			if key := schema.Tables[table].Key; len(key) > 0 {
-				if _, err := e.source.ExecContext(ctx,
-					fmt.Sprintf("SELECT bridge_primary_key(?, ?, %s)", listLiteral(key)),
-					bridgeID, qualified); err != nil {
-					return fmt.Errorf("primary key %s: %w", qualified, err)
-				}
-			}
-			for _, g := range schema.Tables[table].Grants {
-				// A NULL fifth argument would make DuckDB skip the call entirely, not pass NULL.
-				stmt, args := "SELECT bridge_policy(?, ?, ?, ?)", []any{bridgeID, qualified, g.Verb, g.Using}
-				if g.Check != "" {
-					stmt, args = "SELECT bridge_policy(?, ?, ?, ?, ?)", append(args, g.Check)
-				}
-				if _, err := e.source.ExecContext(ctx, stmt, args...); err != nil {
-					return fmt.Errorf("grant %s %s: %w", g.Verb, qualified, err)
-				}
-			}
-		}
+	if _, err := e.source.ExecContext(ctx,
+		"SELECT bridge_configure_policy(?, ?)", bridgeID, string(policy)); err != nil {
+		return fmt.Errorf("policy: %w", err)
 	}
 
 	if _, err := e.source.ExecContext(ctx, "SELECT bridge_finalize_context(?)", bridgeID); err != nil {
@@ -130,7 +113,7 @@ func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, cat
 	// ATTACH options fold to constants at bind time; ? placeholders are rejected.
 	if _, err := db.ExecContext(ctx,
 		fmt.Sprintf("ATTACH '' AS %s (TYPE virtual_catalog_bridge, ID %s, TOKEN %s)",
-			quoteIdent(name), quoteString(bridgeID), quoteString(token))); err != nil {
+			sqlquote.Ident(name), sqlquote.String(bridgeID), sqlquote.String(token))); err != nil {
 		return fmt.Errorf("attach bridge: %w", err)
 	}
 	return nil

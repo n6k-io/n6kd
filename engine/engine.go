@@ -15,13 +15,14 @@ import (
 	"net/url"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
 	"go.uber.org/zap"
 
+	"github.com/n6k-io/n6kd/internal/sqlquote"
+	"github.com/n6k-io/n6kd/internal/textfmt"
 	"github.com/n6k-io/n6kd/perms"
 )
 
@@ -59,8 +60,8 @@ func InstallExtensions(ctx context.Context, log *zap.SugaredLogger) error {
 	}
 	for _, name := range sessionExtensions {
 		// #nosec G201 -- name comes from sessionExtensions, repo from the
-		// operator's environment; both are escaped by quoteString.
-		stmt := fmt.Sprintf("INSTALL %s FROM %s", quoteString(name), quoteString(repo))
+		// operator's environment; both are escaped by sqlquote.String.
+		stmt := fmt.Sprintf("INSTALL %s FROM %s", sqlquote.String(name), sqlquote.String(repo))
 		// #nosec G701 -- stmt is built from the constant list and a quoted repo above.
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("install %s: %w", name, err)
@@ -97,6 +98,10 @@ type Options struct {
 	// Lockdown takes the local filesystem and extension installation away from
 	// served connections.
 	Lockdown bool
+	// Passed to virtual_catalog_lockdown, per DatabaseInstance: each session is
+	// its own. Empty or zero keeps that database's current setting.
+	MemoryLimit string
+	Threads     int
 }
 
 type Engine struct {
@@ -168,7 +173,7 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 			return nil, errors.Join(err, closeTasks(tasks), source.Close())
 		}
 		if opts.Lockdown {
-			if err := applyLockdown(ctx, source); err != nil {
+			if err := applyLockdown(ctx, source, opts); err != nil {
 				return nil, errors.Join(err, closeTasks(tasks), source.Close())
 			}
 		}
@@ -176,11 +181,45 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 		return engine, nil
 	}
 	engine.catalogs = slices.Sorted(maps.Keys(opts.Perms.Catalogs))
-	if err := engine.verifyPermsAgainstSource(ctx); err != nil {
+	if err := engine.validatePolicies(ctx); err != nil {
 		return nil, errors.Join(err, closeTasks(tasks), source.Close())
 	}
 	engine.startIntervalTasks(tasks)
 	return engine, nil
+}
+
+// validatePolicies fails boot on any policy setting the bridge would refuse
+// against the source as loaded; a session still re-checks at ATTACH.
+func (e *Engine) validatePolicies(ctx context.Context) error {
+	var failures []error
+	for _, name := range e.catalogs {
+		rows, err := e.source.QueryContext(ctx,
+			`SELECT coalesce(path, '<document>'), severity, message FROM bridge_validate_policy_config(?, ?)`,
+			name, string(e.opts.Perms.Catalogs[name]))
+		if err != nil {
+			return fmt.Errorf("catalog %q: validate policy: %w", name, err)
+		}
+		for rows.Next() {
+			var path, severity, message string
+			if err := rows.Scan(&path, &severity, &message); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if severity == "error" {
+				failures = append(failures, fmt.Errorf("catalog %q: %s: %s", name, path, message))
+			} else {
+				e.log.Warnf("catalog %q: %s (%s): %s", name, path, severity, message)
+			}
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return err
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("perms.yml: %w", errors.Join(failures...))
+	}
+	e.log.Infof("perms check passed: %s", textfmt.Plural(len(e.catalogs), "catalog"))
+	return nil
 }
 
 func (e *Engine) collectSourceCatalogs(ctx context.Context) error {
@@ -212,7 +251,7 @@ func (e *Engine) collectSourceCatalogs(ctx context.Context) error {
 			return err
 		}
 		e.log.Warnf("catalog %q serves %s with full read/write access (no perms.yml)",
-			name, plural(tables, "table"))
+			name, textfmt.Plural(tables, "table"))
 	}
 	return nil
 }
@@ -223,128 +262,6 @@ func (e *Engine) Close() error {
 		e.wg.Wait()
 	}
 	return errors.Join(e.closeIntervalTasks(), e.source.Close())
-}
-
-// verifyPermsAgainstSource runs every check the bridge would otherwise run per session
-// against the loaded schema: the table exists, and one granting update or delete resolves a
-// primary key. Doing it here turns a perms.yml mistake into a failure to boot
-// rather than an error on every client that connects. It also logs each
-// resolved table and its access.
-func (e *Engine) verifyPermsAgainstSource(ctx context.Context) error {
-	total, keyed := 0, 0
-
-	for _, name := range slices.Sorted(maps.Keys(e.opts.Perms.Catalogs)) {
-		catalog := e.opts.Perms.Catalogs[name]
-		e.log.Infof("catalog %q serves %s", name, plural(countTables(catalog), "table"))
-
-		// Aligned on the name as printed, so the access column lines up.
-		width := 0
-		for schemaName, schema := range catalog.Schemas {
-			for table := range schema.Tables {
-				width = max(width, len(qualify(name, schemaName, table)))
-			}
-		}
-
-		for _, schemaName := range slices.Sorted(maps.Keys(catalog.Schemas)) {
-			schema := catalog.Schemas[schemaName]
-			for _, table := range slices.Sorted(maps.Keys(schema.Tables)) {
-				if err := e.requireSourceTable(ctx, name, schemaName, table); err != nil {
-					return err
-				}
-				total++
-
-				t := schema.Tables[table]
-				verbs := strings.Join(t.Verbs(), ", ")
-				if !t.NeedsKey() {
-					e.log.Infof("  %-*s  %s", width, qualify(name, schemaName, table), verbs)
-					continue
-				}
-				keyed++
-				key, origin, err := e.resolvePrimaryKey(ctx, name, schemaName, table, t.Key)
-				if err != nil {
-					return err
-				}
-				e.log.Infof("  %-*s  %s, primary key %s (from %s)",
-					width, qualify(name, schemaName, table), verbs, strings.Join(key, ", "), origin)
-			}
-		}
-	}
-
-	if keyed == 0 {
-		e.log.Infof("perms check passed: %s found, none needing a primary key", plural(total, "table"))
-		return nil
-	}
-	e.log.Infof("perms check passed: %s found, %s with a usable primary key",
-		plural(total, "table"), plural(keyed, "updatable or deletable table"))
-	return nil
-}
-
-func countTables(catalog perms.Catalog) int {
-	n := 0
-	for _, schema := range catalog.Schemas {
-		n += len(schema.Tables)
-	}
-	return n
-}
-
-// requireSourceTable catches a table perms.yml names but the schema file never
-// created.
-func (e *Engine) requireSourceTable(ctx context.Context, catalog, schema, table string) error {
-	var found int
-	err := e.source.QueryRowContext(ctx,
-		`SELECT count(*) FROM duckdb_tables()
-		 WHERE database_name = ? AND schema_name = ? AND table_name = ?`,
-		catalog, schema, table,
-	).Scan(&found)
-	if err != nil {
-		return err
-	}
-	if found == 0 {
-		return fmt.Errorf("perms.yml names %s, which the boot SQL did not create", qualify(catalog, schema, table))
-	}
-	return nil
-}
-
-// resolvePrimaryKey mirrors what bridge discovery does for a table granting
-// update or delete: take the perms.yml override if there is one, otherwise discover the
-// declared key, and refuse the table if neither yields columns. The override is
-// additionally checked against duckdb_columns().
-func (e *Engine) resolvePrimaryKey(ctx context.Context, catalog, schema, table string, override []string) ([]string, string, error) {
-	if len(override) > 0 {
-		for _, column := range override {
-			var found int
-			err := e.source.QueryRowContext(ctx,
-				`SELECT count(*) FROM duckdb_columns()
-				 WHERE database_name = ? AND schema_name = ? AND table_name = ?
-				   AND lower(column_name) = lower(?)`,
-				catalog, schema, table, column,
-			).Scan(&found)
-			if err != nil {
-				return nil, "", err
-			}
-			if found == 0 {
-				return nil, "", fmt.Errorf("key for %s names column %q, which that table does not have",
-					qualify(catalog, schema, table), column)
-			}
-		}
-		return override, "perms.yml", nil
-	}
-
-	var columns sql.NullString
-	err := e.source.QueryRowContext(ctx,
-		`SELECT array_to_string(constraint_column_names, ',') FROM duckdb_constraints()
-		 WHERE database_name = ? AND schema_name = ? AND table_name = ?
-		   AND constraint_type = 'PRIMARY KEY'`,
-		catalog, schema, table,
-	).Scan(&columns)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && columns.String == "") {
-		return nil, "", fmt.Errorf("%s grants update or delete but has no primary key; declare one in the schema or set key in perms.yml",
-			qualify(catalog, schema, table))
-	}
-	if err != nil {
-		return nil, "", err
-	}
-	return strings.Split(columns.String, ","), "schema", nil
 }
 
 // Catalogs names what a session will carry, for logging at accept time.
