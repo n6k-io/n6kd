@@ -1,4 +1,4 @@
-# Each catalog is served under its own name, so a client reaches its tables as
+# A client selects a catalog by its key here, and reaches its tables as
 # <alias>.main.users after ATTACH 'n6k://host' AS <alias> (TYPE n6k, CATALOG 'app').
 # Its value is a vcatbridge policy document, passed to
 # vcatbridge_configure_policy as written. This is the complete list: an unlisted

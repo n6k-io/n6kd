@@ -5,8 +5,6 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// gcpSeverity maps zap levels onto Cloud Logging's severity values, which is
-// what makes a JSON line render at the right level in the GCP console.
 func gcpSeverity(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	switch level {
 	case zapcore.DebugLevel:
@@ -43,15 +41,11 @@ func installLogger(debug, jsonLogs bool) (*zap.SugaredLogger, error) {
 	} else {
 		cfg.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 	}
-	// The file:line of the log statement is noise for an operator; the message
-	// says where it came from. A stack trace on an error line is the same.
 	cfg.DisableCaller = true
 	cfg.DisableStacktrace = true
 	if !jsonLogs {
 		cfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05.000")
 	}
-	// stderr for both, so stdout stays free for anything a later subcommand
-	// wants to emit as data.
 	cfg.OutputPaths = []string{"stderr"}
 	cfg.ErrorOutputPaths = []string{"stderr"}
 
@@ -59,8 +53,6 @@ func installLogger(debug, jsonLogs bool) (*zap.SugaredLogger, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Installed globally too, so a package reaching for zap.L() rather than
-	// taking a logger still writes in the same format.
 	zap.ReplaceGlobals(log)
 	return log.Sugar(), nil
 }

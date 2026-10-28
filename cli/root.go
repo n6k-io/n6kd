@@ -22,8 +22,6 @@ import (
 )
 
 func Execute() error {
-	// Ctrl-C reaches Run through the command context, which is what drives the
-	// graceful shutdown rather than killing in-flight requests.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := loadDotenv(os.Args[1:]); err != nil {
@@ -49,8 +47,6 @@ func newRootCmd() *cobra.Command {
 			"With --listen (N6K_LISTEN), listens on that Unix socket instead and serves\n" +
 			"every client that connects, trusting the parent that dials in.",
 		Args: cobra.NoArgs,
-		// Named return so the deferred close can report a failure to flush or
-		// release the database rather than drop it.
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			// Set here, not on the command: the arguments already parsed, so anything
 			// that fails past this point is a runtime error and usage would be noise.
@@ -72,8 +68,8 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 
-			// All of this runs before server.Run binds the TCP listener, so a bad schema
-			// or a bad perms.yml fails the boot instead of the first request.
+			// All of this runs before any client is served, so a bad schema or a bad
+			// perms.yml fails the boot instead of the first request.
 			started := time.Now()
 
 			socket, err := openSocketMode(authn, listenPath)

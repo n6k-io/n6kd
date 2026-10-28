@@ -32,8 +32,8 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 	return c.ws.WriteMessage(messageType, data)
 }
 
-// Deliver blocks the calling pump until the session reads the frame or the Conn
-// closes, and reports whether it was taken.
+// Deliver queues the frame for the session, blocking the calling pump while the
+// queue is full, and returns false if the Conn closed first.
 func (c *Conn) Deliver(payload []byte) bool {
 	select {
 	case c.inbox <- payload:

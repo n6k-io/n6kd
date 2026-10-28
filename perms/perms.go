@@ -38,7 +38,6 @@ const policyVersion = 1
 // Catalogs a served database already has, so the bridge cannot ATTACH over them.
 var reservedCatalogs = map[string]bool{"memory": true, "system": true, "temp": true}
 
-// File is the parsed form the engine consumes.
 type File struct {
 	// Catalog name -> its vcatbridge_configure_policy document.
 	Catalogs map[string]json.RawMessage
@@ -63,7 +62,6 @@ func Load(path string) (*File, error) {
 
 func Parse(raw []byte) (*File, error) {
 	var w wire
-	// Strict so a typo'd key is an error rather than a silently ignored setting.
 	if err := yaml.UnmarshalStrict(raw, &w); err != nil {
 		return nil, err
 	}

@@ -1,9 +1,9 @@
 // Package engine owns the DuckDB side: one source database holding the tables
-// the schema file created, and one bridged database per client session.
+// the boot SQL created, and how clients are served from it.
 //
-// The source is never handed to a client: a session gets a separate database
-// whose catalogs are attached TYPE vcatbridge, granted the tables
-// perms.yml names.
+// With perms.yml, the source is never handed to a client: each session gets a
+// separate database whose catalogs are attached TYPE vcatbridge, granted the
+// tables perms.yml names. Without, every client is served the source itself.
 package engine
 
 import (
@@ -33,7 +33,6 @@ const ExtensionDirEnv = "N6K_EXTENSION_DIR"
 // and no network. Unrelated to ExtensionDirEnv, which names a different layout.
 const ExtensionHomeEnv = "N6K_EXTENSION_HOME"
 
-// ExtensionRepoEnv overrides the release bucket.
 const ExtensionRepoEnv = "N6K_EXTENSION_REPO"
 
 const defaultExtensionRepo = "https://storage.googleapis.com/n6k-duckdb-release"
@@ -51,7 +50,7 @@ const bridgeExtension = "vcatbridge"
 // before lockdown takes extension loading away.
 var quackExtensions = []string{"quack", "httpfs"}
 
-// InstallExtensions downloads every extension a session can need into DuckDB's
+// InstallExtensions downloads every extension n6kd or quack loads into DuckDB's
 // extension_directory. The container image runs this at build time (Dockerfile).
 func InstallExtensions(ctx context.Context, log *zap.SugaredLogger) error {
 	db, err := sql.Open("duckdb", extensionDSN())
@@ -101,18 +100,19 @@ type Step struct {
 }
 
 type Options struct {
-	// Run into the source database in order, before anything is served.
 	Boot []Step
 	// nil means no perms.yml: sessions share the source directly, unbridged.
 	Perms *perms.File
-	// Empty means no authentication; otherwise clients must present this token.
+	// Ignored when Verifier is set. Otherwise empty means no authentication, and
+	// clients must present this token.
 	APIKey   string
 	Verifier TokenVerifier
 	// Lockdown takes the local filesystem and extension installation away from
 	// served connections.
 	Lockdown bool
-	// Passed to vcatbridge_lockdown, per DatabaseInstance: each session is
-	// its own. Empty or zero keeps that database's current setting.
+	// Passed to vcatbridge_lockdown, per DatabaseInstance: with Perms each
+	// session is its own, without they share the source. Empty or zero keeps
+	// that database's current setting.
 	MemoryLimit string
 	Threads     int
 	// Serve over quack (ServeQuack) instead of n6k sessions. With Perms, it
@@ -302,7 +302,6 @@ func (e *Engine) Close() error {
 	return errors.Join(quackErr, e.closeIntervalTasks(), e.source.Close())
 }
 
-// Catalogs names what a session will carry, for logging at accept time.
 func (e *Engine) Catalogs() []string {
 	return e.catalogs
 }

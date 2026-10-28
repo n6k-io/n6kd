@@ -19,7 +19,6 @@ import (
 	"github.com/n6k-io/n6kd/engine"
 )
 
-// How long in-flight requests get to finish after a shutdown signal.
 const shutdownGrace = 10 * time.Second
 
 type Config struct {
@@ -61,7 +60,6 @@ func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLo
 	}
 
 	log.Infof("shutting down, giving clients up to %v to finish", shutdownGrace)
-	// Detached from ctx, which is already cancelled — this is the grace window.
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -129,8 +127,6 @@ func newRouter(cfg Config, eng *engine.Engine, log *zap.SugaredLogger) http.Hand
 	return r
 }
 
-// requestLogger logs every request at info, except /healthz and /ws, which are
-// logged at debug. serveWS logs its own connect and disconnect lines.
 func requestLogger(log *zap.SugaredLogger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -89,7 +89,6 @@ func SelfTest(ctx context.Context, log *zap.SugaredLogger) error {
 	}
 	log.Infof("selftest: write to a writable table accepted")
 
-	// audit_log grants only select in selftestPerms, so this INSERT must fail.
 	if _, err := session.DB().ExecContext(ctx,
 		`INSERT INTO app.main.audit_log VALUES (2, 'logout')`); err == nil {
 		return fmt.Errorf("selftest: write to a read-only table was accepted")

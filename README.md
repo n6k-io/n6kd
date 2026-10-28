@@ -119,8 +119,8 @@ catalogs:
 Each catalog's value is a `vcatbridge` policy document, passed to
 `vcatbridge_configure_policy` as written; `policy_version` defaults to `1`. See the
 bridge's `docs/policy-v1.schema.json` for every setting (`schemas`, `functions`,
-`foreign_keys`, ...). The bridge validates the document when a client connects,
-and an unlisted verb is denied.
+`foreign_keys`, ...). The bridge validates the document at boot and again when a
+client connects, and an unlisted verb is denied.
 
 | Verb | Value |
 | --- | --- |

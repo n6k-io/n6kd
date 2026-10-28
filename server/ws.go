@@ -53,11 +53,9 @@ func newUpgrader(origins []string) *websocket.Upgrader {
 	}
 }
 
-// Live sessions, reported in the connect and disconnect lines.
 var activeSessions atomic.Int64
 
 func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrader, eng *engine.Engine, mcpServer *mcp.Server, log *zap.SugaredLogger) {
-	// The last 6 of chi's request id, to tell concurrent clients apart in the log.
 	client := r.RemoteAddr
 	if id := middleware.GetReqID(r.Context()); len(id) >= 6 {
 		client = fmt.Sprintf("%s [%s]", r.RemoteAddr, id[len(id)-6:])
@@ -79,8 +77,6 @@ func serveWS(w http.ResponseWriter, r *http.Request, upgrader *websocket.Upgrade
 
 	var counts counters
 	started := time.Now()
-	// Named rather than prefixed by hand, so the session and engine lines below
-	// carry the client without threading a string through every call.
 	err = serveSession(r.Context(), closer, eng, mcpServer, log.Named(client), &counts)
 	elapsed := time.Since(started).Round(time.Millisecond)
 	if errors.Is(err, engine.ErrUnauthorized) {
@@ -119,8 +115,8 @@ type counters struct {
 	bytesOut  atomic.Int64
 }
 
-// serveSession owns one client for its whole life: a private bridged database,
-// a socketpair, and the blocking CALL that serves it.
+// serveSession owns one client for its whole life: its session, a socketpair,
+// and the blocking CALL that serves it.
 func serveSession(ctx context.Context, closer *wsCloser, eng *engine.Engine, mcpServer *mcp.Server, log *zap.SugaredLogger, counts *counters) (err error) {
 	ws := closer.ws
 	text := wstext.New(ws)
