@@ -1,9 +1,10 @@
 // Package engine owns the DuckDB side: one source database holding the tables
 // the boot SQL created, and how clients are served from it.
 //
-// With perms.yml, the source is never handed to a client: each session gets a
-// separate database whose catalogs are attached TYPE vcatbridge, granted the
-// tables perms.yml names. Without, every client is served the source itself.
+// With perms.yml, the source is never handed to a client: clients are served a
+// database whose catalogs are attached TYPE vcatbridge, granted the tables
+// perms.yml names (one per session, or the one ServeQuack serves). Without,
+// every client is served the source itself.
 package engine
 
 import (
@@ -51,7 +52,7 @@ const bridgeExtension = "vcatbridge"
 var quackExtensions = []string{"quack", "httpfs"}
 
 // InstallExtensions downloads every extension n6kd or quack loads into DuckDB's
-// extension_directory. The container image runs this at build time (Dockerfile).
+// extension_directory.
 func InstallExtensions(ctx context.Context, log *zap.SugaredLogger) error {
 	db, err := sql.Open("duckdb", extensionDSN())
 	if err != nil {
@@ -100,8 +101,7 @@ type Step struct {
 }
 
 type Options struct {
-	Boot []Step
-	// nil means no perms.yml: sessions share the source directly, unbridged.
+	Boot  []Step
 	Perms *perms.File
 	// Ignored when Verifier is set. Otherwise empty means no authentication, and
 	// clients must present this token.
@@ -110,9 +110,9 @@ type Options struct {
 	// Lockdown takes the local filesystem and extension installation away from
 	// served connections.
 	Lockdown bool
-	// Passed to vcatbridge_lockdown, per DatabaseInstance: with Perms each
-	// session is its own, without they share the source. Empty or zero keeps
-	// that database's current setting.
+	// Passed to vcatbridge_lockdown, per served DatabaseInstance (see Session
+	// and ServeQuack for which one that is). Empty or zero keeps that
+	// database's current setting.
 	MemoryLimit string
 	Threads     int
 	// Serve over quack (ServeQuack) instead of n6k sessions. With Perms, it
@@ -137,8 +137,7 @@ type Engine struct {
 	wg   sync.WaitGroup
 }
 
-// Open builds the source database and runs opts.Boot into it in order. Any
-// error it returns aborts boot before the listener is created.
+// Open builds the source database and runs opts.Boot into it in order.
 func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, error) {
 	if opts.Quack && opts.Perms != nil && len(opts.Perms.Catalogs) != 1 {
 		return nil, fmt.Errorf("quack serves one catalog, perms.yml names %d", len(opts.Perms.Catalogs))
@@ -223,7 +222,7 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 }
 
 // validatePolicies fails boot on any policy setting the bridge would refuse
-// against the source as loaded; a session still re-checks at ATTACH.
+// against the source as loaded; the bridge re-checks when a catalog is registered.
 func (e *Engine) validatePolicies(ctx context.Context) error {
 	var failures []error
 	for _, name := range e.catalogs {

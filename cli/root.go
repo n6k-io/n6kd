@@ -222,8 +222,6 @@ func (f *bootFlags) options(log *zap.SugaredLogger) (engine.Options, error) {
 	}, nil
 }
 
-// newInstallCmd downloads the extensions ahead of any serving. The Dockerfile
-// runs it at build time so the image ships with them already on disk.
 func newInstallCmd() *cobra.Command {
 	var debug, jsonLogs bool
 
@@ -253,8 +251,6 @@ func newInstallCmd() *cobra.Command {
 	return cmd
 }
 
-// newSelfTestCmd exercises the serving path against built-in fixtures. The
-// Dockerfile runs it as the final build step.
 func newSelfTestCmd() *cobra.Command {
 	var debug, jsonLogs bool
 

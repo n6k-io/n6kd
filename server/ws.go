@@ -42,7 +42,7 @@ const serveJoinTimeout = 15 * time.Second
 
 // Browsers never apply CORS to a WebSocket handshake, so the origin list has to
 // be enforced here. A request without an Origin header is not a browser and is
-// let through; the API key is what authenticates it.
+// let through; the token is what authenticates it.
 func newUpgrader(origins []string) *websocket.Upgrader {
 	any := slices.Contains(origins, "*")
 	return &websocket.Upgrader{
@@ -290,7 +290,6 @@ func admitAndServe(ctx context.Context, conn *sql.Conn, eng *engine.Engine, sess
 	return admitAndCall(ctx, conn, eng, session, fd, claims, grantMCP, func() { mcpGranted.Store(true) }, log)
 }
 
-// onGranted runs between admission and the CALL, and only when grantMCP is set.
 func admitAndCall(ctx context.Context, conn *sql.Conn, eng *engine.Engine, session *engine.Session, fd int,
 	claims map[string]any, grantMCP bool, onGranted func(), log *zap.SugaredLogger,
 ) error {
