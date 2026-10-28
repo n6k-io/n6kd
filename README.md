@@ -56,6 +56,42 @@ dialing parent authenticates; the HELLO token is not checked, and `--api-key` /
 
 - `n6kd install` — download the extensions into DuckDB's extension directory
 - `n6kd selftest` — bridge a throwaway catalog end to end
+- `n6kd quack` — serve over DuckDB's quack protocol instead; see below
+
+## Quack
+
+```sh
+n6kd quack -f schema.sql --perms perms.yml --token super_secret
+```
+
+```sql
+-- from any DuckDB client
+INSTALL quack; LOAD quack;
+CREATE SECRET (TYPE quack, TOKEN 'super_secret');
+ATTACH 'quack:localhost:8080' AS app;
+```
+
+A different model from n6k: one database shared by every client and one token,
+with no users and no JWT claims. With `--perms`, perms.yml must name exactly one
+catalog, served bridged as the main database, since that is all a quack client's
+`ATTACH` sees; policies get no `$name` context values. Without
+`--perms`, the loaded database is served directly. Quack speaks plain HTTP, so
+put TLS in a proxy.
+
+Quack's `ATTACH` cannot run `UPDATE` or `DELETE`; send those through
+`quack_query('quack:localhost:8080', '...')`.
+
+Takes `-f`, `-c`, `--perms`, the lockdown flags and `--boot-only` as above, plus:
+
+| Flag | Description |
+| --- | --- |
+| `--addr` | listen address (default `:8080`, or `$PORT`); a host other than `localhost` listens beyond this machine |
+| `--token` | token every client presents, at least 4 characters (`N6KD_QUACK_TOKEN`); generated and logged when empty |
+
+With `N6K_EXTENSION_DIR` set, the local `vcatbridge` build is installed into
+DuckDB's extension directory first: the bridged main database loads it by name,
+and the source must load that same copy. `quack` and `httpfs` load from there too
+(`n6kd install` downloads them).
 
 ## perms.yml
 

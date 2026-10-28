@@ -31,6 +31,31 @@ func openWithExtensions(ctx context.Context, extensions []string, log *zap.Sugar
 	return db, nil
 }
 
+// openInstalledBridge loads vcatbridge by name rather than by path: a
+// vcatbridge: database loads the installed copy as it opens, and a token only
+// redeems against the copy that registered it. A local build from
+// ExtensionDirEnv is installed over that copy first.
+func openInstalledBridge(ctx context.Context, log *zap.SugaredLogger) (*sql.DB, error) {
+	db, err := sql.Open("duckdb", extensionDSN())
+	if err != nil {
+		return nil, err
+	}
+	if os.Getenv(ExtensionDirEnv) != "" {
+		target, err := ExtensionPath(bridgeExtension)
+		if err != nil {
+			return nil, errors.Join(err, db.Close())
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("FORCE INSTALL %s", sqlquote.String(target))); err != nil {
+			return nil, errors.Join(fmt.Errorf("install %s: %w", bridgeExtension, err), db.Close())
+		}
+		log.Debugf("installed extension %s from %s", bridgeExtension, target)
+	}
+	if _, err := db.ExecContext(ctx, "LOAD "+bridgeExtension); err != nil {
+		return nil, errors.Join(fmt.Errorf("load %s: %w", bridgeExtension, err), db.Close())
+	}
+	return db, nil
+}
+
 // ExtensionPath returns the first <dir>/<name>/<name>.duckdb_extension found
 // under the ExtensionDirEnv path list, and otherwise the bare name, which LOAD
 // resolves against DuckDB's extension_directory — what InstallExtensions populated.

@@ -41,9 +41,15 @@ const defaultExtensionRepo = "https://storage.googleapis.com/n6k-duckdb-release"
 // The source only answers bridge scans (vcatbridge). A session is
 // also the end of a client's socket, which needs n6k_client and n6k_server.
 var (
-	sourceExtensions  = []string{"vcatbridge"}
-	sessionExtensions = []string{"vcatbridge", "n6k_client", "n6k_server"}
+	sourceExtensions  = []string{bridgeExtension}
+	sessionExtensions = []string{bridgeExtension, "n6k_client", "n6k_server"}
 )
+
+const bridgeExtension = "vcatbridge"
+
+// Quack serves over these, from DuckDB's own repository; httpfs must be loaded
+// before lockdown takes extension loading away.
+var quackExtensions = []string{"quack", "httpfs"}
 
 // InstallExtensions downloads every extension a session can need into DuckDB's
 // extension_directory. The container image runs this at build time (Dockerfile).
@@ -67,6 +73,13 @@ func InstallExtensions(ctx context.Context, log *zap.SugaredLogger) error {
 			return fmt.Errorf("install %s: %w", name, err)
 		}
 		log.Infof("installed extension %s from %s", name, repo)
+	}
+	for _, name := range quackExtensions {
+		// #nosec G201 -- name comes from quackExtensions, escaped by sqlquote.String.
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("INSTALL %s", sqlquote.String(name))); err != nil {
+			return fmt.Errorf("install %s: %w", name, err)
+		}
+		log.Infof("installed extension %s", name)
 	}
 	return nil
 }
@@ -102,6 +115,9 @@ type Options struct {
 	// its own. Empty or zero keeps that database's current setting.
 	MemoryLimit string
 	Threads     int
+	// Serve over quack (ServeQuack) instead of n6k sessions. With Perms, it
+	// must name exactly one catalog: quack clients see only the main database.
+	Quack bool
 }
 
 type Engine struct {
@@ -109,6 +125,9 @@ type Engine struct {
 	opts     Options
 	catalogs []string
 	log      *zap.SugaredLogger
+
+	// The vcatbridge: database ServeQuack serves; nil when it serves the source.
+	quack *sql.DB
 
 	// Each holds the connection its body runs on, released by Close.
 	tasks []*intervalTask
@@ -121,12 +140,22 @@ type Engine struct {
 // Open builds the source database and runs opts.Boot into it in order. Any
 // error it returns aborts boot before the listener is created.
 func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, error) {
-	// Direct mode serves the socket from this database, not from a session's.
-	extensions := sourceExtensions
-	if opts.Perms == nil {
-		extensions = sessionExtensions
+	if opts.Quack && opts.Perms != nil && len(opts.Perms.Catalogs) != 1 {
+		return nil, fmt.Errorf("quack serves one catalog, perms.yml names %d", len(opts.Perms.Catalogs))
 	}
-	source, err := openWithExtensions(ctx, extensions, log)
+
+	var source *sql.DB
+	var err error
+	if opts.Quack {
+		source, err = openInstalledBridge(ctx, log)
+	} else {
+		// Direct mode serves the socket from this database, not from a session's.
+		extensions := sourceExtensions
+		if opts.Perms == nil {
+			extensions = sessionExtensions
+		}
+		source, err = openWithExtensions(ctx, extensions, log)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -169,10 +198,15 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 	}
 
 	if opts.Perms == nil {
-		if err := engine.collectSourceCatalogs(ctx); err != nil {
+		collect := engine.collectSourceCatalogs
+		if opts.Quack {
+			collect = engine.collectQuackCatalog
+		}
+		if err := collect(ctx); err != nil {
 			return nil, errors.Join(err, closeTasks(tasks), source.Close())
 		}
-		if opts.Lockdown {
+		// Quack locks down after quack_serve, in ServeQuack.
+		if opts.Lockdown && !opts.Quack {
 			if err := applyLockdown(ctx, source, opts); err != nil {
 				return nil, errors.Join(err, closeTasks(tasks), source.Close())
 			}
@@ -261,7 +295,11 @@ func (e *Engine) Close() error {
 		close(e.done)
 		e.wg.Wait()
 	}
-	return errors.Join(e.closeIntervalTasks(), e.source.Close())
+	var quackErr error
+	if e.quack != nil {
+		quackErr = e.quack.Close()
+	}
+	return errors.Join(quackErr, e.closeIntervalTasks(), e.source.Close())
 }
 
 // Catalogs names what a session will carry, for logging at accept time.
