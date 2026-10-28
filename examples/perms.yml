@@ -1,7 +1,7 @@
 # Each catalog is served under its own name, so a client reaches its tables as
 # <alias>.main.users after ATTACH 'n6k://host' AS <alias> (TYPE n6k, CATALOG 'app').
-# Its value is a virtual_catalog_bridge policy document, passed to
-# bridge_configure_policy as written. This is the complete list: an unlisted
+# Its value is a vcatbridge policy document, passed to
+# vcatbridge_configure_policy as written. This is the complete list: an unlisted
 # table does not exist for clients, and an unlisted verb is denied.
 catalogs:
   app:

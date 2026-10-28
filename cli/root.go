@@ -200,7 +200,7 @@ func newInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Download the n6k DuckDB extensions into DuckDB's extension directory",
-		Long: "Installs the extensions this server loads (virtual_catalog_bridge, n6k_client, n6k_server) from\n" +
+		Long: "Installs the extensions this server loads (vcatbridge, n6k_client, n6k_server) from\n" +
 			"the release bucket. Set " + engine.ExtensionHomeEnv + " to choose where they land and\n" +
 			engine.ExtensionRepoEnv + " to install from somewhere other than the default bucket.",
 		Args: cobra.NoArgs,

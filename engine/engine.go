@@ -2,7 +2,7 @@
 // the schema file created, and one bridged database per client session.
 //
 // The source is never handed to a client: a session gets a separate database
-// whose catalogs are attached TYPE virtual_catalog_bridge, granted the tables
+// whose catalogs are attached TYPE vcatbridge, granted the tables
 // perms.yml names.
 package engine
 
@@ -38,11 +38,11 @@ const ExtensionRepoEnv = "N6K_EXTENSION_REPO"
 
 const defaultExtensionRepo = "https://storage.googleapis.com/n6k-duckdb-release"
 
-// The source only answers bridge scans (virtual_catalog_bridge). A session is
+// The source only answers bridge scans (vcatbridge). A session is
 // also the end of a client's socket, which needs n6k_client and n6k_server.
 var (
-	sourceExtensions  = []string{"virtual_catalog_bridge"}
-	sessionExtensions = []string{"virtual_catalog_bridge", "n6k_client", "n6k_server"}
+	sourceExtensions  = []string{"vcatbridge"}
+	sessionExtensions = []string{"vcatbridge", "n6k_client", "n6k_server"}
 )
 
 // InstallExtensions downloads every extension a session can need into DuckDB's
@@ -98,7 +98,7 @@ type Options struct {
 	// Lockdown takes the local filesystem and extension installation away from
 	// served connections.
 	Lockdown bool
-	// Passed to virtual_catalog_lockdown, per DatabaseInstance: each session is
+	// Passed to vcatbridge_lockdown, per DatabaseInstance: each session is
 	// its own. Empty or zero keeps that database's current setting.
 	MemoryLimit string
 	Threads     int
@@ -194,7 +194,7 @@ func (e *Engine) validatePolicies(ctx context.Context) error {
 	var failures []error
 	for _, name := range e.catalogs {
 		rows, err := e.source.QueryContext(ctx,
-			`SELECT coalesce(path, '<document>'), severity, message FROM bridge_validate_policy_config(?, ?)`,
+			`SELECT coalesce(path, '<document>'), severity, message FROM vcatbridge_validate_policy_config(?, ?)`,
 			name, string(e.opts.Perms.Catalogs[name]))
 		if err != nil {
 			return fmt.Errorf("catalog %q: validate policy: %w", name, err)

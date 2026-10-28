@@ -89,30 +89,30 @@ func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, pol
 
 	var token string
 	if err := e.source.QueryRowContext(ctx,
-		"SELECT bridge_register_source(?, ?)", bridgeID, name,
+		"SELECT vcatbridge_register_source(?, ?)", bridgeID, name,
 	).Scan(&token); err != nil {
 		return fmt.Errorf("register source: %w", err)
 	}
 
 	for _, key := range slices.Sorted(maps.Keys(values)) {
 		if _, err := e.source.ExecContext(ctx,
-			"SELECT bridge_set_context(?, ?, ?)", bridgeID, key, values[key]); err != nil {
+			"SELECT vcatbridge_set_context(?, ?, ?)", bridgeID, key, values[key]); err != nil {
 			return fmt.Errorf("context %s: %w", key, err)
 		}
 	}
 
 	if _, err := e.source.ExecContext(ctx,
-		"SELECT bridge_configure_policy(?, ?)", bridgeID, string(policy)); err != nil {
+		"SELECT vcatbridge_configure_policy(?, ?)", bridgeID, string(policy)); err != nil {
 		return fmt.Errorf("policy: %w", err)
 	}
 
-	if _, err := e.source.ExecContext(ctx, "SELECT bridge_finalize_context(?)", bridgeID); err != nil {
+	if _, err := e.source.ExecContext(ctx, "SELECT vcatbridge_finalize_context(?)", bridgeID); err != nil {
 		return fmt.Errorf("finalize context: %w", err)
 	}
 
 	// ATTACH options fold to constants at bind time; ? placeholders are rejected.
 	if _, err := db.ExecContext(ctx,
-		fmt.Sprintf("ATTACH '' AS %s (TYPE virtual_catalog_bridge, ID %s, TOKEN %s)",
+		fmt.Sprintf("ATTACH '' AS %s (TYPE vcatbridge, ID %s, TOKEN %s)",
 			sqlquote.Ident(name), sqlquote.String(bridgeID), sqlquote.String(token))); err != nil {
 		return fmt.Errorf("attach bridge: %w", err)
 	}

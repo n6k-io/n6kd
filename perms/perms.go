@@ -1,8 +1,8 @@
 // Package perms loads the permissions file that decides which catalogs a client
 // may see, and how.
 //
-// The file maps each served catalog to a virtual_catalog_bridge policy
-// document, passed to bridge_configure_policy as written:
+// The file maps each served catalog to a vcatbridge policy
+// document, passed to vcatbridge_configure_policy as written:
 //
 //	catalogs:
 //	  app:
@@ -40,7 +40,7 @@ var reservedCatalogs = map[string]bool{"memory": true, "system": true, "temp": t
 
 // File is the parsed form the engine consumes.
 type File struct {
-	// Catalog name -> its bridge_configure_policy document.
+	// Catalog name -> its vcatbridge_configure_policy document.
 	Catalogs map[string]json.RawMessage
 }
 

@@ -12,7 +12,7 @@ n6kd install   # download the n6k DuckDB extensions
 To run against local extension builds instead, point `N6K_EXTENSION_DIR` at
 their `build/release/extension` directories as an OS path list (`:` on Unix,
 `;` on Windows); each is searched
-for `<name>/<name>.duckdb_extension`. `virtual_catalog_bridge` comes from
+for `<name>/<name>.duckdb_extension`. `vcatbridge` comes from
 `duckdb-virtual-catalog`, `n6k_client` and `n6k_server` from `duckdb-n6k-protocol`.
 Tests skip when it is unset.
 
@@ -80,8 +80,8 @@ catalogs:
         delete: "status = 'closed'"
 ```
 
-Each catalog's value is a `virtual_catalog_bridge` policy document, passed to
-`bridge_configure_policy` as written; `policy_version` defaults to `1`. See the
+Each catalog's value is a `vcatbridge` policy document, passed to
+`vcatbridge_configure_policy` as written; `policy_version` defaults to `1`. See the
 bridge's `docs/policy-v1.schema.json` for every setting (`schemas`, `functions`,
 `foreign_keys`, ...). The bridge validates the document when a client connects,
 and an unlisted verb is denied.
