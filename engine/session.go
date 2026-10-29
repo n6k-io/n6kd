@@ -80,46 +80,54 @@ func (e *Engine) Admit(ctx context.Context, s *Session, values map[string]any, l
 	return nil
 }
 
-// The token expires after 30s idle, so nothing slow may sit between register and ATTACH.
 func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, policy json.RawMessage, values map[string]any) error {
-	bridgeID, err := newBridgeID()
+	bridgeID, token, err := e.registerBridge(ctx, name, policy, values)
 	if err != nil {
 		return err
 	}
 
-	var token string
-	if err := e.source.QueryRowContext(ctx,
-		"SELECT bridge_register_source(?, ?)", bridgeID, name,
-	).Scan(&token); err != nil {
-		return fmt.Errorf("register source: %w", err)
-	}
-
-	for _, key := range slices.Sorted(maps.Keys(values)) {
-		if _, err := e.source.ExecContext(ctx,
-			"SELECT bridge_set_context(?, ?, ?)", bridgeID, key, values[key]); err != nil {
-			return fmt.Errorf("context %s: %w", key, err)
-		}
-	}
-
-	if _, err := e.source.ExecContext(ctx,
-		"SELECT bridge_configure_policy(?, ?)", bridgeID, string(policy)); err != nil {
-		return fmt.Errorf("policy: %w", err)
-	}
-
-	if _, err := e.source.ExecContext(ctx, "SELECT bridge_finalize_context(?)", bridgeID); err != nil {
-		return fmt.Errorf("finalize context: %w", err)
-	}
-
 	// ATTACH options fold to constants at bind time; ? placeholders are rejected.
 	if _, err := db.ExecContext(ctx,
-		fmt.Sprintf("ATTACH '' AS %s (TYPE virtual_catalog_bridge, ID %s, TOKEN %s)",
+		fmt.Sprintf("ATTACH '' AS %s (TYPE vcatbridge, ID %s, TOKEN %s)",
 			sqlquote.Ident(name), sqlquote.String(bridgeID), sqlquote.String(token))); err != nil {
 		return fmt.Errorf("attach bridge: %w", err)
 	}
 	return nil
 }
 
-func newBridgeID() (string, error) {
+// The token expires after 30s idle, so nothing slow may sit between this and
+// redeeming it.
+func (e *Engine) registerBridge(ctx context.Context, name string, policy json.RawMessage, values map[string]any) (bridgeID, token string, err error) {
+	bridgeID, err = randomHex()
+	if err != nil {
+		return "", "", err
+	}
+
+	if err := e.source.QueryRowContext(ctx,
+		"SELECT vcatbridge_register_source(?, ?)", bridgeID, name,
+	).Scan(&token); err != nil {
+		return "", "", fmt.Errorf("register source: %w", err)
+	}
+
+	for _, key := range slices.Sorted(maps.Keys(values)) {
+		if _, err := e.source.ExecContext(ctx,
+			"SELECT vcatbridge_set_context(?, ?, ?)", bridgeID, key, values[key]); err != nil {
+			return "", "", fmt.Errorf("context %s: %w", key, err)
+		}
+	}
+
+	if _, err := e.source.ExecContext(ctx,
+		"SELECT vcatbridge_configure_policy(?, ?)", bridgeID, string(policy)); err != nil {
+		return "", "", fmt.Errorf("policy: %w", err)
+	}
+
+	if _, err := e.source.ExecContext(ctx, "SELECT vcatbridge_finalize_context(?)", bridgeID); err != nil {
+		return "", "", fmt.Errorf("finalize context: %w", err)
+	}
+	return bridgeID, token, nil
+}
+
+func randomHex() (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", err

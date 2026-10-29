@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"go.uber.org/zap"
 
 	"github.com/n6k-io/n6kd/engine"
 	"github.com/n6k-io/n6kd/internal/textfmt"
@@ -20,8 +22,6 @@ import (
 )
 
 func Execute() error {
-	// Ctrl-C reaches Run through the command context, which is what drives the
-	// graceful shutdown rather than killing in-flight requests.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := loadDotenv(os.Args[1:]); err != nil {
@@ -33,16 +33,9 @@ func Execute() error {
 
 func newRootCmd() *cobra.Command {
 	var cfg server.Config
-	var permsPath string
+	var f bootFlags
 	var authn authFlags
-	var lockdown, noLockdown bool
-	var memoryLimit string
-	var threads int
-	var debug, jsonLogs bool
-	var bootOnly bool
 	var listenPath string
-
-	var boot []engine.Step
 
 	cmd := &cobra.Command{
 		Use:   "n6kd -f schema.sql [-f file.sql | -c SQL]... [--perms perms.yml]",
@@ -54,26 +47,16 @@ func newRootCmd() *cobra.Command {
 			"With --listen (N6K_LISTEN), listens on that Unix socket instead and serves\n" +
 			"every client that connects, trusting the parent that dials in.",
 		Args: cobra.NoArgs,
-		// Named return so the deferred close can report a failure to flush or
-		// release the database rather than drop it.
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			// Set here, not on the command: the arguments already parsed, so anything
 			// that fails past this point is a runtime error and usage would be noise.
 			cmd.SilenceUsage = true
 
-			if noLockdown {
-				if cmd.Flags().Changed("lockdown") && lockdown {
-					return fmt.Errorf("--lockdown and --no-lockdown contradict each other")
-				}
-				lockdown = false
-			}
-			if env := os.Getenv("N6KD_THREADS"); env != "" && !cmd.Flags().Changed("threads") {
-				if threads, err = strconv.Atoi(env); err != nil {
-					return fmt.Errorf("N6KD_THREADS: %w", err)
-				}
+			if err := f.resolve(cmd); err != nil {
+				return err
 			}
 
-			log, err := installLogger(debug, jsonLogs)
+			log, err := installLogger(f.debug, f.jsonLogs)
 			if err != nil {
 				return err
 			}
@@ -81,25 +64,12 @@ func newRootCmd() *cobra.Command {
 			// failing the run over.
 			defer func() { _ = log.Sync() }()
 
-			if len(boot) == 0 {
-				return fmt.Errorf("no boot SQL given: pass -f or -c")
-			}
-
-			var paths []string
-			for _, step := range boot {
-				if step.Path != "" {
-					paths = append(paths, step.Path)
-				}
-			}
-			if permsPath != "" {
-				paths = append(paths, permsPath)
-			}
-			if err := requireExistingFiles(paths...); err != nil {
+			if err := f.requireFiles(); err != nil {
 				return err
 			}
 
-			// All of this runs before server.Run binds the TCP listener, so a bad schema
-			// or a bad perms.yml fails the boot instead of the first request.
+			// All of this runs before any client is served, so a bad schema or a bad
+			// perms.yml fails the boot instead of the first request.
 			started := time.Now()
 
 			socket, err := openSocketMode(authn, listenPath)
@@ -108,44 +78,26 @@ func newRootCmd() *cobra.Command {
 			}
 			defer func() { err = errors.Join(err, socket.close()) }()
 
-			var rules *perms.File
-			if permsPath == "" {
-				log.Warnf("no perms.yml given: serving the loaded database directly, with no permission layer")
-			} else {
-				rules, err = perms.Load(permsPath)
-				if err != nil {
-					return err
-				}
-				log.Infof("loaded perms %s (%s)", permsPath, textfmt.Plural(len(rules.Catalogs), "catalog"))
-			}
-
-			if lockdown {
-				log.Infof("lockdown on: served connections cannot reach the filesystem")
-			} else {
-				log.Warnf("lockdown off: a client's SQL can read and write this host's files")
+			opts, err := f.options(log)
+			if err != nil {
+				return err
 			}
 
 			verifier, err := authn.verifier(cmd.Context(), log)
 			if err != nil {
 				return err
 			}
+			opts.APIKey = authn.apiKey
+			opts.Verifier = verifier
 
-			eng, err := engine.Open(cmd.Context(), engine.Options{
-				Boot:        boot,
-				Perms:       rules,
-				APIKey:      authn.apiKey,
-				Verifier:    verifier,
-				Lockdown:    lockdown,
-				MemoryLimit: memoryLimit,
-				Threads:     threads,
-			}, log)
+			eng, err := engine.Open(cmd.Context(), opts, log)
 			if err != nil {
 				return err
 			}
 			defer func() { err = errors.Join(err, eng.Close()) }()
 			log.Infof("startup finished in %v", time.Since(started).Round(time.Millisecond))
 
-			if bootOnly {
+			if f.bootOnly {
 				log.Infof("--boot-only: boot SQL ran, not serving")
 				return nil
 			}
@@ -157,14 +109,10 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(newInstallCmd(), newSelfTestCmd(), newMCPCmd(), newAuthCmd())
+	cmd.AddCommand(newInstallCmd(), newSelfTestCmd(), newMCPCmd(), newAuthCmd(), newQuackCmd())
 	addDotenvFlag(cmd.PersistentFlags())
 
-	cmd.Flags().VarP(&stepFlag{steps: &boot, file: true}, "file", "f",
-		"SQL file run into the source database at boot; repeatable, in order with -c")
-	cmd.Flags().VarP(&stepFlag{steps: &boot}, "command", "c",
-		"SQL run into the source database at boot; repeatable, in order with -f")
-	cmd.Flags().StringVar(&permsPath, "perms", "", "perms.yml naming the catalogs to serve bridged")
+	f.register(cmd.Flags(), "per session database")
 	cmd.Flags().StringVar(&cfg.Addr, "addr", defaultAddr(), "address to listen on")
 	cmd.Flags().StringVar(&listenPath, "listen", os.Getenv(server.ListenEnv),
 		"Unix socket to listen on instead of --addr, serving every client that connects; the parent dialing in authenticates")
@@ -176,32 +124,112 @@ func newRootCmd() *cobra.Command {
 		"OIDC issuer whose JWTs clients must present; their claims become $name context in perms.yml")
 	cmd.Flags().StringVar(&authn.audience, "oidc-audience", os.Getenv("N6KD_OIDC_AUDIENCE"),
 		"aud claim a client's JWT must carry; required with --oidc-issuer-url")
-	cmd.Flags().BoolVar(&lockdown, "lockdown", os.Getenv("N6KD_NO_LOCKDOWN") == "",
-		"take the local filesystem and extension installation away from served connections")
-	cmd.Flags().BoolVar(&noLockdown, "no-lockdown", false, "the inverse of --lockdown")
-	cmd.Flags().StringVar(&memoryLimit, "memory-limit", os.Getenv("N6KD_MEMORY_LIMIT"),
-		"memory_limit locked in under --lockdown, per session database; default DuckDB's")
-	cmd.Flags().IntVar(&threads, "threads", 0,
-		"threads locked in under --lockdown, per session database (N6KD_THREADS); default DuckDB's")
-	cmd.Flags().BoolVar(&bootOnly, "boot-only", false,
-		"run the -f files and -c statements, then exit without binding the listener")
-	cmd.Flags().BoolVar(&debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-connection and per-catalog detail")
-	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
-		"log JSON lines with Cloud Logging severity fields, for log collectors")
 	cmd.SetErrPrefix("n6kd:")
 	return cmd
 }
 
-// newInstallCmd downloads the extensions ahead of any serving. The Dockerfile
-// runs it at build time so the image ships with them already on disk.
+// bootFlags are what the root command and quack share: the boot SQL, perms.yml
+// and the served database's lockdown.
+type bootFlags struct {
+	boot                 []engine.Step
+	permsPath            string
+	lockdown, noLockdown bool
+	memoryLimit          string
+	threads              int
+	debug, jsonLogs      bool
+	bootOnly             bool
+}
+
+// limitScope says what --memory-limit and --threads apply to.
+func (f *bootFlags) register(flags *pflag.FlagSet, limitScope string) {
+	flags.VarP(&stepFlag{steps: &f.boot, file: true}, "file", "f",
+		"SQL file run into the source database at boot; repeatable, in order with -c")
+	flags.VarP(&stepFlag{steps: &f.boot}, "command", "c",
+		"SQL run into the source database at boot; repeatable, in order with -f")
+	flags.StringVar(&f.permsPath, "perms", "", "perms.yml naming the catalogs to serve bridged")
+	flags.BoolVar(&f.lockdown, "lockdown", os.Getenv("N6KD_NO_LOCKDOWN") == "",
+		"take the local filesystem and extension installation away from served connections")
+	flags.BoolVar(&f.noLockdown, "no-lockdown", false, "the inverse of --lockdown")
+	flags.StringVar(&f.memoryLimit, "memory-limit", os.Getenv("N6KD_MEMORY_LIMIT"),
+		"memory_limit locked in under --lockdown, "+limitScope+"; default DuckDB's")
+	flags.IntVar(&f.threads, "threads", 0,
+		"threads locked in under --lockdown, "+limitScope+" (N6KD_THREADS); default DuckDB's")
+	flags.BoolVar(&f.bootOnly, "boot-only", false,
+		"run the -f files and -c statements, then exit without binding the listener")
+	flags.BoolVar(&f.debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-connection and per-catalog detail")
+	flags.BoolVar(&f.jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
+		"log JSON lines with Cloud Logging severity fields, for log collectors")
+}
+
+func (f *bootFlags) resolve(cmd *cobra.Command) error {
+	if f.noLockdown {
+		if cmd.Flags().Changed("lockdown") && f.lockdown {
+			return fmt.Errorf("--lockdown and --no-lockdown contradict each other")
+		}
+		f.lockdown = false
+	}
+	if env := os.Getenv("N6KD_THREADS"); env != "" && !cmd.Flags().Changed("threads") {
+		threads, err := strconv.Atoi(env)
+		if err != nil {
+			return fmt.Errorf("N6KD_THREADS: %w", err)
+		}
+		f.threads = threads
+	}
+	return nil
+}
+
+func (f *bootFlags) requireFiles() error {
+	if len(f.boot) == 0 {
+		return fmt.Errorf("no boot SQL given: pass -f or -c")
+	}
+	var paths []string
+	for _, step := range f.boot {
+		if step.Path != "" {
+			paths = append(paths, step.Path)
+		}
+	}
+	if f.permsPath != "" {
+		paths = append(paths, f.permsPath)
+	}
+	return requireExistingFiles(paths...)
+}
+
+func (f *bootFlags) options(log *zap.SugaredLogger) (engine.Options, error) {
+	var rules *perms.File
+	if f.permsPath == "" {
+		log.Warnf("no perms.yml given: serving the loaded database directly, with no permission layer")
+	} else {
+		var err error
+		rules, err = perms.Load(f.permsPath)
+		if err != nil {
+			return engine.Options{}, err
+		}
+		log.Infof("loaded perms %s (%s)", f.permsPath, textfmt.Plural(len(rules.Catalogs), "catalog"))
+	}
+
+	if f.lockdown {
+		log.Infof("lockdown on: served connections cannot reach the filesystem")
+	} else {
+		log.Warnf("lockdown off: a client's SQL can read and write this host's files")
+	}
+
+	return engine.Options{
+		Boot:        f.boot,
+		Perms:       rules,
+		Lockdown:    f.lockdown,
+		MemoryLimit: f.memoryLimit,
+		Threads:     f.threads,
+	}, nil
+}
+
 func newInstallCmd() *cobra.Command {
 	var debug, jsonLogs bool
 
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Download the n6k DuckDB extensions into DuckDB's extension directory",
-		Long: "Installs the extensions this server loads (virtual_catalog_bridge, n6k_client, n6k_server) from\n" +
-			"the release bucket. Set " + engine.ExtensionHomeEnv + " to choose where they land and\n" +
+		Long: "Installs the extensions this server loads (vcatbridge, n6k_client, n6k_server) from\n" +
+			"the release bucket, and quack and httpfs from DuckDB's. Set " + engine.ExtensionHomeEnv + " to choose where they land and\n" +
 			engine.ExtensionRepoEnv + " to install from somewhere other than the default bucket.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -223,8 +251,6 @@ func newInstallCmd() *cobra.Command {
 	return cmd
 }
 
-// newSelfTestCmd exercises the serving path against built-in fixtures. The
-// Dockerfile runs it as the final build step.
 func newSelfTestCmd() *cobra.Command {
 	var debug, jsonLogs bool
 

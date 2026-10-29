@@ -44,7 +44,7 @@ catalogs:
 `
 
 // open builds an engine from the fixtures above, skipping when the extensions
-// have not been built — this needs the real virtual_catalog_bridge, not a stand-in.
+// have not been built — this needs the real vcatbridge, not a stand-in.
 func open(t *testing.T) *engine.Engine {
 	t.Helper()
 	return openWith(t, bridgedSchemaSQL, permsYAML)

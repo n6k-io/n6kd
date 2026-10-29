@@ -1,9 +1,10 @@
 // Package engine owns the DuckDB side: one source database holding the tables
-// the schema file created, and one bridged database per client session.
+// the boot SQL created, and how clients are served from it.
 //
-// The source is never handed to a client: a session gets a separate database
-// whose catalogs are attached TYPE virtual_catalog_bridge, granted the tables
-// perms.yml names.
+// With perms.yml, the source is never handed to a client: clients are served a
+// database whose catalogs are attached TYPE vcatbridge, granted the tables
+// perms.yml names (one per session, or the one ServeQuack serves). Without,
+// every client is served the source itself.
 package engine
 
 import (
@@ -33,20 +34,25 @@ const ExtensionDirEnv = "N6K_EXTENSION_DIR"
 // and no network. Unrelated to ExtensionDirEnv, which names a different layout.
 const ExtensionHomeEnv = "N6K_EXTENSION_HOME"
 
-// ExtensionRepoEnv overrides the release bucket.
 const ExtensionRepoEnv = "N6K_EXTENSION_REPO"
 
 const defaultExtensionRepo = "https://storage.googleapis.com/n6k-duckdb-release"
 
-// The source only answers bridge scans (virtual_catalog_bridge). A session is
+// The source only answers bridge scans (vcatbridge). A session is
 // also the end of a client's socket, which needs n6k_client and n6k_server.
 var (
-	sourceExtensions  = []string{"virtual_catalog_bridge"}
-	sessionExtensions = []string{"virtual_catalog_bridge", "n6k_client", "n6k_server"}
+	sourceExtensions  = []string{bridgeExtension}
+	sessionExtensions = []string{bridgeExtension, "n6k_client", "n6k_server"}
 )
 
-// InstallExtensions downloads every extension a session can need into DuckDB's
-// extension_directory. The container image runs this at build time (Dockerfile).
+const bridgeExtension = "vcatbridge"
+
+// Quack serves over these, from DuckDB's own repository; httpfs must be loaded
+// before lockdown takes extension loading away.
+var quackExtensions = []string{"quack", "httpfs"}
+
+// InstallExtensions downloads every extension n6kd or quack loads into DuckDB's
+// extension_directory.
 func InstallExtensions(ctx context.Context, log *zap.SugaredLogger) error {
 	db, err := sql.Open("duckdb", extensionDSN())
 	if err != nil {
@@ -68,6 +74,13 @@ func InstallExtensions(ctx context.Context, log *zap.SugaredLogger) error {
 		}
 		log.Infof("installed extension %s from %s", name, repo)
 	}
+	for _, name := range quackExtensions {
+		// #nosec G201 -- name comes from quackExtensions, escaped by sqlquote.String.
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("INSTALL %s", sqlquote.String(name))); err != nil {
+			return fmt.Errorf("install %s: %w", name, err)
+		}
+		log.Infof("installed extension %s", name)
+	}
 	return nil
 }
 
@@ -88,20 +101,23 @@ type Step struct {
 }
 
 type Options struct {
-	// Run into the source database in order, before anything is served.
-	Boot []Step
-	// nil means no perms.yml: sessions share the source directly, unbridged.
+	Boot  []Step
 	Perms *perms.File
-	// Empty means no authentication; otherwise clients must present this token.
+	// Ignored when Verifier is set. Otherwise empty means no authentication, and
+	// clients must present this token.
 	APIKey   string
 	Verifier TokenVerifier
 	// Lockdown takes the local filesystem and extension installation away from
 	// served connections.
 	Lockdown bool
-	// Passed to virtual_catalog_lockdown, per DatabaseInstance: each session is
-	// its own. Empty or zero keeps that database's current setting.
+	// Passed to vcatbridge_lockdown, per served DatabaseInstance (see Session
+	// and ServeQuack for which one that is). Empty or zero keeps that
+	// database's current setting.
 	MemoryLimit string
 	Threads     int
+	// Serve over quack (ServeQuack) instead of n6k sessions. With Perms, it
+	// must name exactly one catalog: quack clients see only the main database.
+	Quack bool
 }
 
 type Engine struct {
@@ -109,6 +125,9 @@ type Engine struct {
 	opts     Options
 	catalogs []string
 	log      *zap.SugaredLogger
+
+	// The vcatbridge: database ServeQuack serves; nil when it serves the source.
+	quack *sql.DB
 
 	// Each holds the connection its body runs on, released by Close.
 	tasks []*intervalTask
@@ -118,15 +137,24 @@ type Engine struct {
 	wg   sync.WaitGroup
 }
 
-// Open builds the source database and runs opts.Boot into it in order. Any
-// error it returns aborts boot before the listener is created.
+// Open builds the source database and runs opts.Boot into it in order.
 func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, error) {
-	// Direct mode serves the socket from this database, not from a session's.
-	extensions := sourceExtensions
-	if opts.Perms == nil {
-		extensions = sessionExtensions
+	if opts.Quack && opts.Perms != nil && len(opts.Perms.Catalogs) != 1 {
+		return nil, fmt.Errorf("quack serves one catalog, perms.yml names %d", len(opts.Perms.Catalogs))
 	}
-	source, err := openWithExtensions(ctx, extensions, log)
+
+	var source *sql.DB
+	var err error
+	if opts.Quack {
+		source, err = openInstalledBridge(ctx, log)
+	} else {
+		// Direct mode serves the socket from this database, not from a session's.
+		extensions := sourceExtensions
+		if opts.Perms == nil {
+			extensions = sessionExtensions
+		}
+		source, err = openWithExtensions(ctx, extensions, log)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -169,10 +197,15 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 	}
 
 	if opts.Perms == nil {
-		if err := engine.collectSourceCatalogs(ctx); err != nil {
+		collect := engine.collectSourceCatalogs
+		if opts.Quack {
+			collect = engine.collectQuackCatalog
+		}
+		if err := collect(ctx); err != nil {
 			return nil, errors.Join(err, closeTasks(tasks), source.Close())
 		}
-		if opts.Lockdown {
+		// Quack locks down after quack_serve, in ServeQuack.
+		if opts.Lockdown && !opts.Quack {
 			if err := applyLockdown(ctx, source, opts); err != nil {
 				return nil, errors.Join(err, closeTasks(tasks), source.Close())
 			}
@@ -189,12 +222,12 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 }
 
 // validatePolicies fails boot on any policy setting the bridge would refuse
-// against the source as loaded; a session still re-checks at ATTACH.
+// against the source as loaded; the bridge re-checks when a catalog is registered.
 func (e *Engine) validatePolicies(ctx context.Context) error {
 	var failures []error
 	for _, name := range e.catalogs {
 		rows, err := e.source.QueryContext(ctx,
-			`SELECT coalesce(path, '<document>'), severity, message FROM bridge_validate_policy_config(?, ?)`,
+			`SELECT coalesce(path, '<document>'), severity, message FROM vcatbridge_validate_policy_config(?, ?)`,
 			name, string(e.opts.Perms.Catalogs[name]))
 		if err != nil {
 			return fmt.Errorf("catalog %q: validate policy: %w", name, err)
@@ -261,10 +294,13 @@ func (e *Engine) Close() error {
 		close(e.done)
 		e.wg.Wait()
 	}
-	return errors.Join(e.closeIntervalTasks(), e.source.Close())
+	var quackErr error
+	if e.quack != nil {
+		quackErr = e.quack.Close()
+	}
+	return errors.Join(quackErr, e.closeIntervalTasks(), e.source.Close())
 }
 
-// Catalogs names what a session will carry, for logging at accept time.
 func (e *Engine) Catalogs() []string {
 	return e.catalogs
 }

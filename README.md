@@ -12,9 +12,9 @@ n6kd install   # download the n6k DuckDB extensions
 To run against local extension builds instead, point `N6K_EXTENSION_DIR` at
 their `build/release/extension` directories as an OS path list (`:` on Unix,
 `;` on Windows); each is searched
-for `<name>/<name>.duckdb_extension`. `virtual_catalog_bridge` comes from
-`duckdb-virtual-catalog`, `n6k_client` and `n6k_server` from `duckdb-driver`
-(see `.air.toml`). Tests skip when it is unset.
+for `<name>/<name>.duckdb_extension`. `vcatbridge` comes from
+`duckdb-virtual-catalog`, `n6k_client` and `n6k_server` from `duckdb-n6k-protocol`.
+Tests skip when it is unset.
 
 ## Run
 
@@ -56,6 +56,42 @@ dialing parent authenticates; the HELLO token is not checked, and `--api-key` /
 
 - `n6kd install` — download the extensions into DuckDB's extension directory
 - `n6kd selftest` — bridge a throwaway catalog end to end
+- `n6kd quack` — serve over DuckDB's quack protocol instead; see below
+
+## Quack
+
+```sh
+n6kd quack -f schema.sql --perms perms.yml --token super_secret
+```
+
+```sql
+-- from any DuckDB client
+INSTALL quack; LOAD quack;
+CREATE SECRET (TYPE quack, TOKEN 'super_secret');
+ATTACH 'quack:localhost:8080' AS app;
+```
+
+A different model from n6k: one database shared by every client and one token,
+with no users and no JWT claims. With `--perms`, perms.yml must name exactly one
+catalog, served bridged as the main database, since that is all a quack client's
+`ATTACH` sees; policies get no `$name` context values. Without
+`--perms`, the loaded database is served directly. Quack speaks plain HTTP, so
+put TLS in a proxy.
+
+Quack's `ATTACH` cannot run `UPDATE` or `DELETE`; send those through
+`quack_query('quack:localhost:8080', '...')`.
+
+Takes `-f`, `-c`, `--perms`, the lockdown flags and `--boot-only` as above, plus:
+
+| Flag | Description |
+| --- | --- |
+| `--addr` | listen address (default `:8080`, or `$PORT`); a host other than `localhost` listens beyond this machine |
+| `--token` | token every client presents, at least 4 characters (`N6KD_QUACK_TOKEN`); generated and logged when empty |
+
+With `N6K_EXTENSION_DIR` set, the local `vcatbridge` build is installed into
+DuckDB's extension directory first: the bridged main database loads it by name,
+and the source must load that same copy. `quack` and `httpfs` load from there too
+(`n6kd install` downloads them).
 
 ## perms.yml
 
@@ -80,11 +116,12 @@ catalogs:
         delete: "status = 'closed'"
 ```
 
-Each catalog's value is a `virtual_catalog_bridge` policy document, passed to
-`bridge_configure_policy` as written; `policy_version` defaults to `1`. See the
+Each catalog's value is a `vcatbridge` policy document, passed to
+`vcatbridge_configure_policy` as written; `policy_version` defaults to `1`. See the
 bridge's `docs/policy-v1.schema.json` for every setting (`schemas`, `functions`,
-`foreign_keys`, ...). The bridge validates the document when a client connects,
-and an unlisted verb is denied.
+`foreign_keys`, ...). The bridge validates the document at boot and again each
+time it bridges the catalog (per client, or once under quack), and an unlisted
+verb is denied.
 
 | Verb | Value |
 | --- | --- |

@@ -36,9 +36,6 @@ catalogs:
 // SelfTest runs a whole engine against fixtures of its own: it loads the three
 // extensions, builds a source database, bridges a session, and checks that the
 // bridge both serves rows and refuses a write it should refuse.
-//
-// The Dockerfile runs this after its USER directive, so the baked extensions are
-// checked as the account that serves rather than as root.
 func SelfTest(ctx context.Context, log *zap.SugaredLogger) error {
 	dir, err := os.MkdirTemp("", "n6kd-selftest")
 	if err != nil {
@@ -89,7 +86,6 @@ func SelfTest(ctx context.Context, log *zap.SugaredLogger) error {
 	}
 	log.Infof("selftest: write to a writable table accepted")
 
-	// audit_log grants only select in selftestPerms, so this INSERT must fail.
 	if _, err := session.DB().ExecContext(ctx,
 		`INSERT INTO app.main.audit_log VALUES (2, 'logout')`); err == nil {
 		return fmt.Errorf("selftest: write to a read-only table was accepted")
