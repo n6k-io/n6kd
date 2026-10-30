@@ -25,15 +25,16 @@ fi
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
 server=(--threads "$THREADS" --lockdown)
-boot=(-c "SET VARIABLE rows = $ROWS" -f schema.sql "${server[@]}")
+rows="SET VARIABLE rows = $ROWS;"
+boot=(-c "$rows ATTACH ':memory:' AS app; USE app;" -f schema.sql "${server[@]}")
 "$N6KD" "${boot[@]}" --perms perms.yml --addr localhost:8081 >n6k.log 2>&1 &
 pids+=($!)
 "$N6KD" quack "${boot[@]}" --perms perms.yml --addr localhost:8082 --token bench >quack.log 2>&1 &
 pids+=($!)
 "$N6KD" "${boot[@]}" --addr localhost:8083 >n6k-noperms.log 2>&1 &
 pids+=($!)
-# no-perms quack serves the real main database, which `USE app` does not change
-"$N6KD" quack -c "SET VARIABLE rows = $ROWS" -c "$(grep -v -e '^ATTACH' -e '^USE' schema.sql)" "${server[@]}" --addr localhost:8084 --token bench >quack-noperms.log 2>&1 &
+# no-perms quack serves only the main database
+"$N6KD" quack -c "$rows" -f schema.sql "${server[@]}" --addr localhost:8084 --token bench >quack-noperms.log 2>&1 &
 pids+=($!)
 echo "$(date +%T) starting servers with $ROWS rows" >&2
 for i in 0 1 2 3; do
@@ -53,7 +54,7 @@ attach_quack="$threads LOAD quack; CREATE SECRET (TYPE quack, TOKEN 'bench'); AT
 attach_n6k_noperms="$threads LOAD '$N6K_CLIENT'; ATTACH 'n6k://localhost:8083' AS r (TYPE n6k, CATALOG 'app');"
 attach_quack_noperms="$threads LOAD quack; CREATE SECRET (TYPE quack, TOKEN 'bench'); ATTACH 'quack:localhost:8084' AS r;"
 # the same data in-process, as the reference each target's results must match
-attach_local="$threads SET VARIABLE rows = $ROWS; $(sed 's/AS app;/AS r;/; s/USE app;/USE r;/' schema.sql)"
+attach_local="$threads $rows ATTACH ':memory:' AS r; USE r; $(cat schema.sql)"
 
 # A sanity check, not a full comparison: a result's row count and an
 # order-independent hash. A LIMIT without ORDER BY may return any rows, so only
