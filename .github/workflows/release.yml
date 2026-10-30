@@ -1,0 +1,117 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["release/*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+jobs:
+  # A v* tag releases as itself. A release/<name> branch keeps one rolling
+  # pre-release under the tag release-<name>, moved to each push; the tag is
+  # not release/<name>, which would shadow the branch for every git command.
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          name="${GITHUB_REF_NAME#release/}"
+          case "$name" in
+            */*|"") echo "::error::branch $GITHUB_REF_NAME does not name a release"; exit 1 ;;
+          esac
+          echo "tag=release-$name" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds in bookworm so the binary needs no newer glibc than
+          # the Docker image does.
+          - { os: linux, arch: amd64, runner: ubuntu-latest, container: "golang:1.26-bookworm" }
+          - { os: linux, arch: arm64, runner: ubuntu-24.04-arm, container: "golang:1.26-bookworm" }
+          - { os: darwin, arch: arm64, runner: macos-latest }
+          - { os: darwin, arch: amd64, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    env:
+      CGO_ENABLED: "1"
+      GOTOOLCHAIN: auto
+      NAME: n6kd-${{ needs.meta.outputs.tag }}-${{ matrix.os }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - if: matrix.os == 'darwin'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The container's checkout is owned by another uid, and go build refuses
+      # to stamp the VCS version from it otherwise.
+      - if: matrix.container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: build
+        run: |
+          ldflags='-s -w'
+          if [ "${{ matrix.os }}" = linux ]; then
+            ldflags="$ldflags -extldflags \"-static-libstdc++ -static-libgcc\""
+          fi
+          mkdir -p "dist/$NAME"
+          go build -trimpath -ldflags "$ldflags" -o "dist/$NAME/n6kd" .
+
+      # The archive carries the extensions it was selftested with, so a release
+      # never picks up a later upload to the bucket.
+      - run: N6K_EXTENSION_HOME="$PWD/dist/$NAME/extensions" "dist/$NAME/n6kd" install
+
+      # Unset, so selftest proves the binary finds the bundled extensions itself.
+      - run: env -u N6K_EXTENSION_HOME "dist/$NAME/n6kd" selftest
+
+      - run: tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.meta.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - working-directory: dist
+        run: sha256sum -- *.tar.gz > SHA256SUMS
+
+      - if: github.ref_type == 'tag'
+        run: gh release create "$TAG" dist/* --verify-tag --generate-notes
+
+      # --cleanup-tag drops the old tag too, so the new one lands on this commit.
+      - if: github.ref_type == 'branch'
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --cleanup-tag --yes
+          fi
+          gh release create "$TAG" dist/* --prerelease --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "Pre-release of $GITHUB_REF_NAME at $GITHUB_SHA."
