@@ -15,6 +15,7 @@ import (
 	"maps"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"sync"
@@ -34,6 +35,10 @@ const ExtensionDirEnv = "N6K_EXTENSION_DIR"
 // the container sets it so a released build loads by name with no local build
 // and no network. Unrelated to ExtensionDirEnv, which names a different layout.
 const ExtensionHomeEnv = "N6K_EXTENSION_HOME"
+
+// bundledExtensionDir is the baked install a release archive ships beside the
+// binary, used when ExtensionHomeEnv is unset.
+const bundledExtensionDir = "extensions"
 
 const ExtensionRepoEnv = "N6K_EXTENSION_REPO"
 
@@ -88,10 +93,30 @@ func InstallExtensions(ctx context.Context, log *zap.SugaredLogger) error {
 // The n6k extensions are unsigned, so loading them needs allow_unsigned_extensions.
 func extensionDSN() string {
 	dsn := "?allow_unsigned_extensions=true"
-	if home := os.Getenv(ExtensionHomeEnv); home != "" {
+	if home := extensionHome(); home != "" {
 		dsn += "&extension_directory=" + url.QueryEscape(home)
 	}
 	return dsn
+}
+
+// extensionHome is "" when DuckDB's default extension_directory applies.
+func extensionHome() string {
+	if home := os.Getenv(ExtensionHomeEnv); home != "" {
+		return home
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	// A symlink on PATH must still find the extensions beside the real binary.
+	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		return ""
+	}
+	dir := filepath.Join(filepath.Dir(exe), bundledExtensionDir)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
 }
 
 // sessionDSN opens a session's database at the limits lockdown would lock in, so

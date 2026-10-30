@@ -241,8 +241,7 @@ func newInstallCmd() *cobra.Command {
 		Use:   "install",
 		Short: "Download the n6k DuckDB extensions into DuckDB's extension directory",
 		Long: "Installs the extensions this server loads (vcatbridge, n6k_client, n6k_server) from\n" +
-			"the release bucket, and quack and httpfs from DuckDB's. Set " + engine.ExtensionHomeEnv + " to choose where they land and\n" +
-			engine.ExtensionRepoEnv + " to install from somewhere other than the default bucket.",
+			"the release bucket, and quack and httpfs from DuckDB's. Set " + engine.ExtensionHomeEnv + " to choose where they land (default: an extensions directory beside the binary if one exists, else DuckDB's own)\nand " + engine.ExtensionRepoEnv + " to install from somewhere other than the default bucket.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
