@@ -1,0 +1,1 @@
+DELETE FROM r.a WHERE i < 0;

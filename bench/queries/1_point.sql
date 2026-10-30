@@ -1,0 +1,1 @@
+SELECT * FROM r.a WHERE i = 42;

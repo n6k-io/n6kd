@@ -1,0 +1,5 @@
+catalogs:
+  app:
+    tables:
+      main.a: {select: true, insert: true, update: true, delete: true}
+      main.b: {select: true, insert: true, update: true, delete: true}
