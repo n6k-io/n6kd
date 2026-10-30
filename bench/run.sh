@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Usage: ROWS=1000000 N=5 DUCKDB=duckdb N6KD=./n6kd N6K_CLIENT=n6k_client bench/run.sh
+# Usage: [ROWS=] [N=] [THREADS=] [DUCKDB=] [N6KD=] [N6K_CLIENT=] bench/run.sh
+# Relative paths resolve from bench/.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -7,6 +8,10 @@ DUCKDB=${DUCKDB:-duckdb}
 N6KD=${N6KD:-../n6kd}
 ROWS=${ROWS:-1000000}
 N=${N:-5}
+# Each quack scan thread opens its own connection, and quack's server queues only
+# cpp-httplib's CPPHTTPLIB_LISTEN_BACKLOG of them; more threads than that and
+# connects fail. --threads applies only under --lockdown, so it is passed.
+THREADS=${THREADS:-4}
 N6K_CLIENT=${N6K_CLIENT:-n6k_client}
 
 want=$(awk '$1 == "github.com/duckdb/duckdb-go/v2" { sub(/^v2\./, "", $2); v = $2 + 0
@@ -19,8 +24,8 @@ fi
 
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
-boot=(-c "SET VARIABLE rows = $ROWS" -f schema.sql --threads 4)
-# :8081 n6k, :8082 quack, each bridged through perms.yml; :8083, :8084 the same, no perms
+server=(--threads "$THREADS" --lockdown)
+boot=(-c "SET VARIABLE rows = $ROWS" -f schema.sql "${server[@]}")
 "$N6KD" "${boot[@]}" --perms perms.yml --addr localhost:8081 >n6k.log 2>&1 &
 pids+=($!)
 "$N6KD" quack "${boot[@]}" --perms perms.yml --addr localhost:8082 --token bench >quack.log 2>&1 &
@@ -28,7 +33,7 @@ pids+=($!)
 "$N6KD" "${boot[@]}" --addr localhost:8083 >n6k-noperms.log 2>&1 &
 pids+=($!)
 # no-perms quack serves the real main database, which `USE app` does not change
-"$N6KD" quack -c "SET VARIABLE rows = $ROWS" -c "$(grep -v -e '^ATTACH' -e '^USE' schema.sql)" --threads 4 --addr localhost:8084 --token bench >quack-noperms.log 2>&1 &
+"$N6KD" quack -c "SET VARIABLE rows = $ROWS" -c "$(grep -v -e '^ATTACH' -e '^USE' schema.sql)" "${server[@]}" --addr localhost:8084 --token bench >quack-noperms.log 2>&1 &
 pids+=($!)
 echo "$(date +%T) starting servers with $ROWS rows" >&2
 for i in 0 1 2 3; do
@@ -42,10 +47,7 @@ for i in 0 1 2 3; do
 	done
 done
 
-# Each quack scan thread opens its own connection, and quack's server queues only
-# 5 (cpp-httplib's CPPHTTPLIB_LISTEN_BACKLOG); past that, connects fail on macOS 27.
-# Every client and server gets the same 4 threads.
-threads="SET threads = 4;"
+threads="SET threads = $THREADS;"
 attach_n6k="$threads LOAD '$N6K_CLIENT'; ATTACH 'n6k://localhost:8081' AS r (TYPE n6k, CATALOG 'app');"
 attach_quack="$threads LOAD quack; CREATE SECRET (TYPE quack, TOKEN 'bench'); ATTACH 'quack:localhost:8082' AS r;"
 attach_n6k_noperms="$threads LOAD '$N6K_CLIENT'; ATTACH 'n6k://localhost:8083' AS r (TYPE n6k, CATALOG 'app');"
@@ -78,9 +80,9 @@ verdict() {
 	fi
 }
 
-# median ± sample standard deviation of the profiled latency, or the error when every run failed the same way (an
-# unsupported query). An IO error or a run that fails where others succeeded exits
-# the bench. A failed statement prints no profile.
+# median ± sample standard deviation of the profiled latency, or the first error
+# when every run failed. An IO error or a run that fails where others succeeded
+# exits the bench. A failed statement prints no profile.
 measure() {
 	local attach=$1 query=$2 out times ok
 	out=$({
@@ -89,6 +91,7 @@ measure() {
 		echo "PRAGMA enable_profiling = 'json';"
 		for _ in $(seq "$N"); do echo "$query"; done
 	} | "$DUCKDB" -unsigned 2>&1)
+	# the query's own latency is the only "latency" key at 4-space indent
 	times=$(awk '/^    "latency":/ { sub(/,$/, "", $2); print $2 }' <<<"$out" | sort -g)
 	ok=$(grep -c . <<<"$times" || true)
 	if grep -q "IO Error" <<<"$out" || { [ "$ok" -gt 0 ] && [ "$ok" -lt "$N" ]; }; then
@@ -100,7 +103,8 @@ measure() {
 		return
 	fi
 	# The std is rounded to 1 significant figure, 2 when it starts with a 1, and
-	# the median to the same decimal place.
+	# the median to the same decimal place; a std of 0 prints the median to 2
+	# decimals. For an even N the median is the lower middle run.
 	awk '{ t[NR] = $1 * 1000; s += t[NR] } END {
 		m = s / NR
 		for (i = 1; i <= NR; i++) d += (t[i] - m) ^ 2
@@ -117,7 +121,8 @@ measure() {
 
 # Bytes sent / received by the client for one run of the query, attach excluded,
 # from the client's own log: WS for n6k (n6k frames, without WebSocket framing),
-# HTTP for quack (request and response bodies). Its own untimed run, since logging
+# HTTP for quack (request body length and response Content-Length, so a response
+# without that header counts as 0). Its own untimed run, since logging
 # may cost time. Logging must be on before the attach: a connection the attach
 # opens logs only to the log storage current then, and enable_logging and
 # truncate_duckdb_logs replace it. So the attach's traffic is subtracted instead.

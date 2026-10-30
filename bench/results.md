@@ -8,7 +8,7 @@ DuckDB v1.5.6 on both ends. Local builds of `vcatbridge`, `n6k_client` and
 
 "Server" means the server does the work and sends back only the result. "Client"
 means the server sends the rows and the client does the work. Taken from the
-`EXPLAIN` plans in `plans/`.
+`EXPLAIN` plans run.sh writes to `plans/`.
 
 | | n6k | quack |
 | --- | --- | --- |
@@ -23,11 +23,10 @@ means the server sends the rows and the client does the work. Taken from the
 
 ## Timings
 
-Median ± sample standard deviation of 5 runs, from the `latency` DuckDB's JSON
-profiling reports on the client. The std is rounded to 1 significant figure (2
-when it starts with a 1) and the median to the same decimal place. Every client
-and server runs with 4 threads. Table `a` has 1M or 10M rows, table `b` has 100.
-The queries are in `queries/`.
+Median ± sample standard deviation of 5 runs of the client-side profiled latency,
+rounded as `measure` in run.sh does. Table `a` has 1M or 10M rows; run.sh
+defaults otherwise. The queries are in `queries/`; join, update and delete are
+left out, since quack fails them (above).
 
 1M rows:
 
@@ -49,14 +48,12 @@ The queries are in `queries/`.
 | group by | 6.5 ±0.7ms | 5.3 ±1.1ms | 55.5 ±1.4ms | 7 ±2ms | 51 ±6ms |
 | scan (`sum(i)`) | 1.8 ±0.4ms | 2.7 ±1.2ms | 51 ±4ms | 2 ±2ms | 55 ±3ms |
 
-Every run succeeded and every result was correct.
+Every run in these tables succeeded and every result was correct.
 
 ## Data transfer
 
-KiB up / down from the client for one run of the query, attach excluded, from
-the client's own DuckDB log: `WS` for n6k (n6k frames, without WebSocket
-framing), `HTTP` for quack (request and response bodies). It comes from an
-extra, untimed run, since logging may cost time.
+KiB up / down from the client for one untimed run of the query, as `transfer`
+in run.sh measures it.
 
 | query | n6k 1M | n6k 10M | quack 1M | quack 10M |
 | --- | --- | --- | --- | --- |

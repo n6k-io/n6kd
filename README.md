@@ -6,7 +6,7 @@ Serves DuckDB catalogs over the n6k protocol via WebSocket.
 
 ```sh
 go build -o n6kd .
-n6kd install   # download the n6k DuckDB extensions
+./n6kd install   # download the n6k DuckDB extensions
 ```
 
 To run against local extension builds instead, point `N6K_EXTENSION_DIR` at
