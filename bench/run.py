@@ -65,8 +65,11 @@ def check_version():
 
 
 def listening(port):
-    with socket.socket() as s:
-        return s.connect_ex(("localhost", port)) == 0
+    try:
+        socket.create_connection(("localhost", port)).close()
+    except OSError:
+        return False
+    return True
 
 
 def start_servers(stack):
@@ -83,22 +86,25 @@ def start_servers(stack):
             time.sleep(0.2)
 
 
-def attach_sql(column):
-    threads = f"SET threads = {THREADS};"
+def connect(column, log=None):
+    """A fresh in-process database attached to the column's target as r. A
+    connection the attach opens logs only to the log storage current then, so
+    logging is enabled between the extension's LOAD, which registers its log
+    type, and the attach."""
+    con = duckdb.connect(config={"allow_unsigned_extensions": True})
+    con.execute(f"SET threads = {THREADS};")
     if column == "local":
         # the same data in-process, as the reference each target's results must match
-        return f"{threads} {SET_ROWS} ATTACH ':memory:' AS r; USE r; {SCHEMA}"
+        con.execute(f"{SET_ROWS} ATTACH ':memory:' AS r; USE r; {SCHEMA}")
+        return con
     port, _, kind = TARGETS[column]
+    con.execute(f"LOAD '{N6K_CLIENT}';" if kind == "n6k" else "LOAD quack;")
+    if log:
+        con.execute(f"CALL enable_logging('{log}', storage = 'memory');")
     if kind == "n6k":
-        return f"{threads} LOAD '{N6K_CLIENT}'; ATTACH 'n6k://localhost:{port}' AS r (TYPE n6k, CATALOG 'app');"
-    return f"{threads} LOAD quack; CREATE SECRET (TYPE quack, TOKEN 'bench'); ATTACH 'quack:localhost:{port}' AS r;"
-
-
-def connect(column, pre=""):
-    con = duckdb.connect(config={"allow_unsigned_extensions": True})
-    if pre:
-        con.execute(pre)
-    con.execute(attach_sql(column))
+        con.execute(f"ATTACH 'n6k://localhost:{port}' AS r (TYPE n6k, CATALOG 'app');")
+    else:
+        con.execute(f"CREATE SECRET (TYPE quack, TOKEN 'bench'); ATTACH 'quack:localhost:{port}' AS r;")
     return con
 
 
@@ -172,10 +178,9 @@ def transfer(column, query):
     excluded, from the client's own log: WS for n6k (n6k frames, without
     WebSocket framing), HTTP for quack (request body length and response
     Content-Length, so a response without that header counts as 0). Its own
-    untimed run, since logging may cost time. Logging must be on before the
-    attach: a connection the attach opens logs only to the log storage current
-    then, and enable_logging and truncate_duckdb_logs replace it. So the
-    attach's traffic is subtracted instead."""
+    untimed run, since logging may cost time. Logging is on from before the
+    attach (see connect), and enable_logging and truncate_duckdb_logs would
+    replace that storage, so the attach's traffic is subtracted instead."""
     if TARGETS[column][2] == "n6k":
         kind = "WS"
         sent = "sum(bytes) FILTER (direction = 'send')"
@@ -185,15 +190,15 @@ def transfer(column, query):
         sent = "sum(request.request_body_length)"
         recv = "sum(response.headers['Content-Length']::BIGINT)"
     totals = f"SELECT coalesce({sent}, 0), coalesce({recv}, 0) FROM duckdb_logs_parsed('{kind}')"
+    con = connect(column, log=kind)
+    before = con.execute(totals).fetchone()
     try:
-        con = connect(column, pre=f"CALL enable_logging('{kind}', storage = 'memory');")
-        before = con.execute(totals).fetchone()
         con.execute(query).fetchall()
-        after = con.execute(totals).fetchone()
     except duckdb.IOException:
         raise
     except duckdb.Error:
         return "-"
+    after = con.execute(totals).fetchone()
 
     def kib(n):
         return "<1" if n < 1024 else f"{round(n / 1024):,}"

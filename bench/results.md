@@ -8,7 +8,7 @@ DuckDB v1.5.6 on both ends. Local builds of `vcatbridge`, `n6k_client` and
 
 "Server" means the server does the work and sends back only the result. "Client"
 means the server sends the rows and the client does the work. Taken from the
-`EXPLAIN` plans run.sh writes to `plans/`.
+`EXPLAIN` plans run.py writes to `plans/`.
 
 | | n6k | quack |
 | --- | --- | --- |
@@ -24,7 +24,7 @@ means the server sends the rows and the client does the work. Taken from the
 ## Timings
 
 Median ± sample standard deviation of 5 runs of the client-side profiled latency,
-rounded as `measure` in run.sh does. Table `a` has 1M or 10M rows; run.sh
+rounded as `measure` in run.py does. Table `a` has 1M or 10M rows; run.py
 defaults otherwise. The queries are in `queries/`; join, update and delete are
 left out, since quack fails them (above).
 
@@ -53,7 +53,7 @@ Every run in these tables succeeded and every result was correct.
 ## Data transfer
 
 KiB up / down from the client for one untimed run of the query, as `transfer`
-in run.sh measures it.
+in run.py measures it.
 
 | query | n6k 1M | n6k 10M | quack 1M | quack 10M |
 | --- | --- | --- | --- | --- |

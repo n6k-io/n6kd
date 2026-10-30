@@ -22,12 +22,12 @@ Results are in [results.md](results.md).
 
 ```sh
 go build -o n6kd . && ./n6kd install
-ROWS=1000000 N=5 bench/run.sh
+ROWS=1000000 N=5 bench/run.py
 ```
 
-run.sh also checks every answer against a local copy of the data (see
-`fingerprint` in run.sh). A wrong answer shows as `✗ result differs`.
+run.py also checks every answer against a local copy of the data (see
+`fingerprint` in run.py). A wrong answer shows as `✗ result differs`.
 
 To use local extension builds, set `N6K_EXTENSION_DIR` (see the top-level README)
-and `N6K_CLIENT=<path>/n6k_client.duckdb_extension`. `DUCKDB` must be the same
-version n6kd uses; run.sh checks this.
+and `N6K_CLIENT=<path>/n6k_client.duckdb_extension`. run.py runs under `uv`
+with the `duckdb` package pinned to the version n6kd embeds, and checks this.
