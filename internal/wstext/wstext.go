@@ -14,15 +14,21 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// Writer is the websocket side: a *websocket.Conn, or anything else that can
+// put a frame on the client's socket.
+type Writer interface {
+	WriteMessage(messageType int, data []byte) error
+}
+
 type Conn struct {
-	ws      *websocket.Conn
+	ws      Writer
 	writeMu sync.Mutex
 	inbox   chan []byte
 	closed  chan struct{}
 	once    sync.Once
 }
 
-func New(ws *websocket.Conn) *Conn {
+func New(ws Writer) *Conn {
 	return &Conn{ws: ws, inbox: make(chan []byte, 64), closed: make(chan struct{})}
 }
 

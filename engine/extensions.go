@@ -13,8 +13,8 @@ import (
 	"github.com/n6k-io/n6kd/internal/sqlquote"
 )
 
-func openWithExtensions(ctx context.Context, extensions []string, log *zap.SugaredLogger) (*sql.DB, error) {
-	db, err := sql.Open("duckdb", extensionDSN())
+func openWithExtensions(ctx context.Context, dsn string, extensions []string, log *zap.SugaredLogger) (*sql.DB, error) {
+	db, err := sql.Open("duckdb", dsn)
 	if err != nil {
 		return nil, err
 	}

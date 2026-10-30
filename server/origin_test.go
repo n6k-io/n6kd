@@ -42,7 +42,7 @@ func TestCheckOrigin(t *testing.T) {
 			if test.origin != "" {
 				r.Header.Set("Origin", test.origin)
 			}
-			if got := newUpgrader(test.allowed).CheckOrigin(r); got != test.want {
+			if got := newOriginCheck(test.allowed)(r); got != test.want {
 				t.Errorf("CheckOrigin(%q) with %v = %v, want %v", test.origin, test.allowed, got, test.want)
 			}
 		})

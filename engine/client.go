@@ -8,5 +8,5 @@ import (
 )
 
 func OpenClient(ctx context.Context, log *zap.SugaredLogger) (*sql.DB, error) {
-	return openWithExtensions(ctx, []string{"n6k_client"}, log)
+	return openWithExtensions(ctx, extensionDSN(), []string{"n6k_client"}, log)
 }

@@ -25,7 +25,51 @@ type Config struct {
 	Addr           string
 	AllowedOrigins []string
 	// MCP, when set, is served on each websocket's text frames to clients that offer `mcp`.
-	MCP *mcp.Server
+	MCP   *mcp.Server
+	Serve ServeOptions
+}
+
+// ServeOptions apply per connection. Zero leaves a setting at the extension's
+// default, and MaxConnections at no cap.
+type ServeOptions struct {
+	MaxConnections         int
+	ParallelRequests       int
+	IdleStreamTimeout      time.Duration
+	IdleTransactionTimeout time.Duration
+}
+
+func (o ServeOptions) Validate() error {
+	switch {
+	case o.MaxConnections < 0:
+		return fmt.Errorf("--max-connections must not be negative, got %d", o.MaxConnections)
+	case o.ParallelRequests < 0:
+		return fmt.Errorf("--parallel-requests-per-connection must not be negative, got %d", o.ParallelRequests)
+	case o.IdleStreamTimeout != 0 && o.IdleStreamTimeout < time.Millisecond:
+		return fmt.Errorf("--idle-stream-timeout must be 0 or at least 1ms, got %v", o.IdleStreamTimeout)
+	case o.IdleTransactionTimeout != 0 && o.IdleTransactionTimeout < time.Millisecond:
+		return fmt.Errorf("--idle-transaction-timeout must be 0 or at least 1ms, got %v", o.IdleTransactionTimeout)
+	}
+	return nil
+}
+
+// params are the serving CALL's named parameters, each with a leading comma.
+func (o ServeOptions) params() string {
+	var b strings.Builder
+	if o.ParallelRequests > 0 {
+		fmt.Fprintf(&b, ", workers => %d", o.ParallelRequests)
+	}
+	if o.IdleStreamTimeout > 0 {
+		fmt.Fprintf(&b, ", idle_stream_timeout_ms => %d", o.IdleStreamTimeout.Milliseconds())
+	}
+	if o.IdleTransactionTimeout > 0 {
+		fmt.Fprintf(&b, ", idle_txn_timeout_ms => %d", o.IdleTransactionTimeout.Milliseconds())
+	}
+	return b.String()
+}
+
+// full reports whether active connections, counting the one just arrived, are past the cap.
+func (o ServeOptions) full(active int64) bool {
+	return o.MaxConnections > 0 && active > int64(o.MaxConnections)
 }
 
 func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLogger) error {
@@ -101,7 +145,7 @@ func newRouter(cfg Config, eng *engine.Engine, log *zap.SugaredLogger) http.Hand
 	if len(origins) == 0 {
 		origins = []string{"*"}
 	}
-	upgrader := newUpgrader(origins)
+	checkOrigin := newOriginCheck(origins)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -121,7 +165,7 @@ func newRouter(cfg Config, eng *engine.Engine, log *zap.SugaredLogger) http.Hand
 	})
 
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWS(w, r, upgrader, eng, cfg.MCP, log)
+		serveWS(w, r, checkOrigin, eng, cfg.MCP, cfg.Serve, log)
 	})
 
 	return r
