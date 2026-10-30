@@ -52,6 +52,12 @@ func open(t *testing.T) *engine.Engine {
 
 func openWith(t *testing.T, schemaSQL, permsYML string) *engine.Engine {
 	t.Helper()
+	return openWithOptions(t, schemaSQL, permsYML, engine.Options{})
+}
+
+// openWithOptions fills in opts' Boot and Perms from the fixtures.
+func openWithOptions(t *testing.T, schemaSQL, permsYML string, opts engine.Options) *engine.Engine {
+	t.Helper()
 	if os.Getenv(engine.ExtensionDirEnv) == "" {
 		t.Skipf("%s not set", engine.ExtensionDirEnv)
 	}
@@ -70,7 +76,9 @@ func openWith(t *testing.T, schemaSQL, permsYML string) *engine.Engine {
 	if err != nil {
 		t.Fatalf("load perms: %v", err)
 	}
-	eng, err := engine.Open(t.Context(), engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules}, zaptest.NewLogger(t).Sugar())
+	opts.Boot = []engine.Step{{Path: schemaPath}}
+	opts.Perms = rules
+	eng, err := engine.Open(t.Context(), opts, zaptest.NewLogger(t).Sugar())
 	if err != nil {
 		t.Fatalf("open engine: %v", err)
 	}
@@ -262,11 +270,29 @@ func TestLockdownBlocksFileAccessInBridgedSession(t *testing.T) {
 		`SELECT * FROM read_csv('`+permsPath+`')`); err == nil {
 		t.Error("read_csv reached the filesystem under lockdown")
 	}
+	if _, err := session.DB().ExecContext(t.Context(),
+		`SELECT vcatbridge_register_source('probe', 'app')`); err == nil {
+		t.Error("a locked-down session can still write the bridge registry")
+	}
 	// enable_external_access is refused on any running database, locked or not,
 	// so lock_configuration is what this message distinguishes.
 	_, err = session.DB().ExecContext(t.Context(), `SET enable_external_access=true`)
 	if err == nil || !strings.Contains(err.Error(), "locked") {
 		t.Errorf("lockdown was reversible: %v", err)
+	}
+}
+
+// Without lockdown nothing locks the limits in, but the session still opens at them.
+func TestSessionOpensAtTheConfiguredLimits(t *testing.T) {
+	session := newSession(t, openWithOptions(t, bridgedSchemaSQL, permsYAML,
+		engine.Options{Threads: 2, MemoryLimit: "256MiB"}))
+	var threads, memoryLimit string
+	if err := session.DB().QueryRowContext(t.Context(),
+		`SELECT current_setting('threads')::VARCHAR, current_setting('memory_limit')`).Scan(&threads, &memoryLimit); err != nil {
+		t.Fatal(err)
+	}
+	if threads != "2" || memoryLimit != "256.0 MiB" {
+		t.Errorf("session opened with threads %s, memory_limit %s; want 2, 256.0 MiB", threads, memoryLimit)
 	}
 }
 

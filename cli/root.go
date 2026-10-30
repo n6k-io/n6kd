@@ -36,6 +36,7 @@ func newRootCmd() *cobra.Command {
 	var f bootFlags
 	var authn authFlags
 	var listenPath string
+	var pprofAddr string
 
 	cmd := &cobra.Command{
 		Use:   "n6kd -f schema.sql [-f file.sql | -c SQL]... [--perms perms.yml]",
@@ -53,6 +54,9 @@ func newRootCmd() *cobra.Command {
 			cmd.SilenceUsage = true
 
 			if err := f.resolve(cmd); err != nil {
+				return err
+			}
+			if err := cfg.Serve.Validate(); err != nil {
 				return err
 			}
 
@@ -102,8 +106,13 @@ func newRootCmd() *cobra.Command {
 				return nil
 			}
 
+			if pprofAddr != "" {
+				if err := startPprof(cmd.Context(), pprofAddr, log); err != nil {
+					return err
+				}
+			}
 			if socket.serve != nil {
-				return socket.serve(cmd.Context(), eng, log)
+				return socket.serve(cmd.Context(), eng, cfg.Serve, log)
 			}
 			return server.Run(cmd.Context(), cfg, eng, log)
 		},
@@ -114,10 +123,13 @@ func newRootCmd() *cobra.Command {
 
 	f.register(cmd.Flags(), "per session database")
 	cmd.Flags().StringVar(&cfg.Addr, "addr", defaultAddr(), "address to listen on")
+	cmd.Flags().StringVar(&pprofAddr, "pprof", os.Getenv("N6KD_PPROF"),
+		"address to serve Go's net/http/pprof on; off when empty (N6KD_PPROF)")
 	cmd.Flags().StringVar(&listenPath, "listen", os.Getenv(server.ListenEnv),
 		"Unix socket to listen on instead of --addr, serving every client that connects; the parent dialing in authenticates")
 	cmd.Flags().StringSliceVar(&cfg.AllowedOrigins, "allow-origin", defaultAllowedOrigins(),
 		"browser origins allowed to connect (WebSocket handshake and CORS); repeatable, default any")
+	registerServeFlags(cmd.Flags(), &cfg.Serve)
 	cmd.Flags().StringVar(&authn.apiKey, "api-key", os.Getenv("N6KD_API_KEY"),
 		"token clients must present to connect; without one, anyone who reaches the port is served")
 	cmd.Flags().StringVar(&authn.issuerURL, "oidc-issuer-url", os.Getenv("N6KD_OIDC_ISSUER_URL"),

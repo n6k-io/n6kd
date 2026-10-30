@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -93,6 +94,19 @@ func extensionDSN() string {
 	return dsn
 }
 
+// sessionDSN opens a session's database at the limits lockdown would lock in, so
+// a client never holds more than them, locked down or not.
+func sessionDSN(opts Options) string {
+	dsn := extensionDSN()
+	if opts.MemoryLimit != "" {
+		dsn += "&memory_limit=" + url.QueryEscape(opts.MemoryLimit)
+	}
+	if opts.Threads > 0 {
+		dsn += "&threads=" + strconv.Itoa(opts.Threads)
+	}
+	return dsn
+}
+
 // Step is one unit of boot SQL: a file (-f) or inline statements (-c).
 // Exactly one field is set.
 type Step struct {
@@ -111,8 +125,8 @@ type Options struct {
 	// served connections.
 	Lockdown bool
 	// Passed to vcatbridge_lockdown, per served DatabaseInstance (see Session
-	// and ServeQuack for which one that is). Empty or zero keeps that
-	// database's current setting.
+	// and ServeQuack for which one that is), and set on each session's database
+	// as it opens. Empty or zero keeps that database's current setting.
 	MemoryLimit string
 	Threads     int
 	// Serve over quack (ServeQuack) instead of n6k sessions. With Perms, it
@@ -153,7 +167,7 @@ func Open(ctx context.Context, opts Options, log *zap.SugaredLogger) (*Engine, e
 		if opts.Perms == nil {
 			extensions = sessionExtensions
 		}
-		source, err = openWithExtensions(ctx, extensions, log)
+		source, err = openWithExtensions(ctx, extensionDSN(), extensions, log)
 	}
 	if err != nil {
 		return nil, err

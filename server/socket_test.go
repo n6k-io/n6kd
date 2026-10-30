@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"go.uber.org/zap/zaptest"
 )
@@ -70,6 +71,26 @@ func attachOverFD(t *testing.T, fd int, token string) *sql.DB {
 	return db
 }
 
+// connectOverSocket dials path and runs the handshake, returning its error
+// rather than failing the test.
+func connectOverSocket(t *testing.T, path string) error {
+	t.Helper()
+	fd, err := dialUnix(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	db, err := sql.Open("duckdb", "?allow_unsigned_extensions=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	loadClientExtension(t, db)
+	var connected bool
+	return db.QueryRowContext(t.Context(),
+		"SELECT connected FROM n6k_connect(wsFd => ?, token => '')", fd).Scan(&connected)
+}
+
 func shortSocketPath(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "n6kd-")
@@ -114,7 +135,7 @@ func TestListenServesConcurrentClientsAfterAProbe(t *testing.T) {
 	eng := newDirectEngine(t, "")
 	ctx, cancel := context.WithCancel(t.Context())
 	served := make(chan error, 1)
-	go func() { served <- ServeListen(ctx, ln, eng, zaptest.NewLogger(t).Sugar()) }()
+	go func() { served <- ServeListen(ctx, ln, eng, ServeOptions{}, zaptest.NewLogger(t).Sugar()) }()
 
 	probe, err := dialUnix(path)
 	if err != nil {
@@ -152,7 +173,7 @@ func TestListenIgnoresTheHelloToken(t *testing.T) {
 	eng := newDirectEngine(t, "")
 	ctx, cancel := context.WithCancel(t.Context())
 	served := make(chan error, 1)
-	go func() { served <- ServeListen(ctx, ln, eng, zaptest.NewLogger(t).Sugar()) }()
+	go func() { served <- ServeListen(ctx, ln, eng, ServeOptions{}, zaptest.NewLogger(t).Sugar()) }()
 
 	if err := queryUsersOverSocket(t, path, "any-token"); err != nil {
 		t.Fatal(err)
@@ -160,6 +181,76 @@ func TestListenIgnoresTheHelloToken(t *testing.T) {
 	cancel()
 	if err := <-served; err != nil {
 		t.Fatalf("ServeListen: %v", err)
+	}
+}
+
+func TestListenRefusesPastMaxConnections(t *testing.T) {
+	path := shortSocketPath(t)
+	ln, err := ListenSocket(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := newDirectEngine(t, "")
+	ctx, cancel := context.WithCancel(t.Context())
+	served := make(chan error, 1)
+	go func() {
+		served <- ServeListen(ctx, ln, eng, ServeOptions{MaxConnections: 1}, zaptest.NewLogger(t).Sugar())
+	}()
+
+	held, err := dialUnix(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(held) }()
+	db := attachOverFD(t, held, "")
+	defer func() { _ = db.Close() }()
+
+	if err := connectOverSocket(t, path); err == nil {
+		t.Error("a second client connected past --max-connections 1")
+	}
+
+	if _, err := db.ExecContext(t.Context(), "DETACH remote"); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := <-served; err != nil {
+		t.Fatalf("ServeListen: %v", err)
+	}
+}
+
+// An out-of-range value the extension refuses shows each option reaches its CALL.
+func TestListenPassesServeOptionsToTheExtension(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		opts   ServeOptions
+		served bool
+	}{
+		{"in range", ServeOptions{ParallelRequests: 1, IdleStreamTimeout: time.Minute, IdleTransactionTimeout: time.Minute}, true},
+		{"parallel requests out of range", ServeOptions{ParallelRequests: 1 << 20}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := shortSocketPath(t)
+			ln, err := ListenSocket(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eng := newDirectEngine(t, "")
+			ctx, cancel := context.WithCancel(t.Context())
+			served := make(chan error, 1)
+			go func() { served <- ServeListen(ctx, ln, eng, tc.opts, zaptest.NewLogger(t).Sugar()) }()
+
+			if tc.served {
+				if err := queryUsersOverSocket(t, path, ""); err != nil {
+					t.Errorf("not served with %+v: %v", tc.opts, err)
+				}
+			} else if err := connectOverSocket(t, path); err == nil {
+				t.Errorf("served with %+v, which the extension should refuse", tc.opts)
+			}
+			cancel()
+			if err := <-served; err != nil {
+				t.Fatalf("ServeListen: %v", err)
+			}
+		})
 	}
 }
 

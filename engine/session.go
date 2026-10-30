@@ -29,6 +29,9 @@ type Session struct {
 
 func (s *Session) DB() *sql.DB { return s.db }
 
+// Shared reports a direct-mode session, whose database is the engine's source.
+func (s *Session) Shared() bool { return s.shared }
+
 func (s *Session) Close() error {
 	if s.shared {
 		return nil
@@ -52,7 +55,7 @@ func (e *Engine) OpenSession(ctx context.Context, log *zap.SugaredLogger) (*Sess
 		log.Debugf("session serves the source database directly")
 		return &Session{db: e.source, shared: true}, nil
 	}
-	db, err := openWithExtensions(ctx, sessionExtensions, log)
+	db, err := openWithExtensions(ctx, sessionDSN(e.opts), sessionExtensions, log)
 	if err != nil {
 		return nil, err
 	}
@@ -71,13 +74,24 @@ func (e *Engine) Admit(ctx context.Context, s *Session, values map[string]any, l
 		log.Debugf("bridged catalog %q for this client", name)
 	}
 	if e.opts.Lockdown {
-		if err := applyLockdown(ctx, s.db, e.opts); err != nil {
+		if err := applyLockdown(ctx, s.db, e.opts, bridgeRegistryFunctions...); err != nil {
 			return err
 		}
 	}
 	log.Debugf("session ready with %s in %v",
 		textfmt.Plural(len(e.opts.Perms.Catalogs), "catalog"), time.Since(started).Round(time.Millisecond))
 	return nil
+}
+
+// bridgeRegistryFunctions write vcatbridge's registry, which is process-wide:
+// left in a session, its client could fill it.
+var bridgeRegistryFunctions = []string{
+	"vcatbridge_register_source",
+	"vcatbridge_set_context",
+	"vcatbridge_finalize_context",
+	"vcatbridge_set_policy",
+	"vcatbridge_configure_policy",
+	"vcatbridge_finalize_policy",
 }
 
 func (e *Engine) attachCatalog(ctx context.Context, db *sql.DB, name string, policy json.RawMessage, values map[string]any) error {

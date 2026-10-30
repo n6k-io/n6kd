@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -420,6 +421,30 @@ func TestTwoClientsServedAtOnce(t *testing.T) {
 	requireUsers(t, first, "app.main.users", 2)
 	requireUsers(t, second, "app.main.users", 2)
 	requireUsers(t, first, "app.main.users", 2)
+}
+
+func TestWebSocketRefusesPastMaxConnections(t *testing.T) {
+	srv := httptest.NewServer(newRouter(Config{Serve: ServeOptions{MaxConnections: 1}},
+		newDirectEngine(t, ""), zaptest.NewLogger(t).Sugar()))
+	t.Cleanup(srv.Close)
+	requireUsers(t, newClientAs(t, srv, "remote", "memory"), "remote.main.users", 2)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("second client past --max-connections 1: got %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
 }
 
 func TestDirectModeServesTwoClientsAtOnce(t *testing.T) {

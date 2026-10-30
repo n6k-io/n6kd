@@ -16,7 +16,7 @@ import (
 // socketMode is bound before the boot so a bad path fails fast while the
 // parent's dials queue. A nil serve means it is off.
 type socketMode struct {
-	serve func(ctx context.Context, eng *engine.Engine, log *zap.SugaredLogger) error
+	serve func(ctx context.Context, eng *engine.Engine, opts server.ServeOptions, log *zap.SugaredLogger) error
 	close func() error
 }
 
@@ -36,9 +36,9 @@ func openSocketMode(authn authFlags, listenPath string) (socketMode, error) {
 		return none, err
 	}
 	return socketMode{
-		serve: func(ctx context.Context, eng *engine.Engine, log *zap.SugaredLogger) error {
+		serve: func(ctx context.Context, eng *engine.Engine, opts server.ServeOptions, log *zap.SugaredLogger) error {
 			log.Infof("serving %s on %s %s", strings.Join(eng.Catalogs(), ", "), server.ListenEnv, listenPath)
-			return server.ServeListen(ctx, ln, eng, log)
+			return server.ServeListen(ctx, ln, eng, opts, log)
 		},
 		close: func() error {
 			if err := ln.Close(); !errors.Is(err, net.ErrClosed) {

@@ -50,6 +50,7 @@ dialing parent authenticates; the HELLO token is not checked, and `--api-key` /
 | `--memory-limit` / `--threads` | locked in by `--lockdown`, per session database; default DuckDB's (`N6KD_MEMORY_LIMIT`, `N6KD_THREADS`) |
 | `--boot-only` | run the boot SQL, then exit without serving |
 | `--debug` | per-connection and per-catalog logging |
+| `--pprof` | address to serve Go's `net/http/pprof` on, off by default (`N6KD_PPROF`) |
 | `--json-logging` | JSON logs with Cloud Logging severity fields |
 
 ### Commands
