@@ -2,6 +2,16 @@
 
 Serves DuckDB catalogs over the n6k protocol via WebSocket.
 
+## Install
+
+```sh
+curl -fsSL https://n6k-io.github.io/n6kd/get.sh | sh
+```
+
+Installs the latest release, with its extensions, for Linux or macOS on amd64
+or arm64. `N6KD_VERSION` picks a release, `N6KD_HOME` where it is unpacked
+(`~/.n6kd`) and `N6KD_BIN_DIR` where the `n6kd` symlink goes (`~/.local/bin`).
+
 ## Build
 
 ```sh
