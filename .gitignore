@@ -24,3 +24,5 @@ coverage.txt
 # macOS
 .DS_Store
 *.log
+
+examples/server/deploy.sh

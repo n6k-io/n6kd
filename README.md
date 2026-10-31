@@ -207,7 +207,7 @@ predates it. Months and years are rejected; the interval must be positive.
 ## Docker
 
 ```dockerfile
-FROM n6k/n6kd
+FROM srossross/n6kd
 COPY schema.sql /app/schema.sql
 COPY perms.yml  /app/perms.yml
 CMD ["-f", "/app/schema.sql", "--perms", "/app/perms.yml"]
