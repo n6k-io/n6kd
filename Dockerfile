@@ -1,14 +1,14 @@
 # Build from this directory:
-#   docker build -t n6k/n6kd .
+#   docker build -t srossross/n6kd .
 #
 # A child image adds only data. Without a perms.yml every catalog the boot SQL
 # leaves is served read/write to anyone who connects, so set N6KD_API_KEY at
 # run time:
-#   FROM n6k/n6kd
+#   FROM srossross/n6kd
 #   COPY schema.sql /app/schema.sql
 #
 # Naming a perms.yml serves only the tables it lists, at the access it grants:
-#   FROM n6k/n6kd
+#   FROM srossross/n6kd
 #   COPY schema.sql /app/schema.sql
 #   COPY perms.yml  /app/perms.yml
 #   CMD ["-f", "/app/schema.sql", "--perms", "/app/perms.yml"]
