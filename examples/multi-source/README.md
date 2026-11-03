@@ -48,18 +48,25 @@ ATTACH 'n6k://localhost:8080' AS transit (TYPE n6k, CATALOG 'transit');
 ```
 
 Daily airport pickups from BigQuery, named from the zones CSV, next to subway
-ridership:
+ridership, over Thanksgiving 2022:
 
 ```sql
 SELECT t.day, z.Zone, t.pickups, r.subways_total_estimated_ridership AS subway
 FROM (
   SELECT pickup_datetime::DATE AS day, pickup_location_id, count(*) AS pickups
   FROM taxi.new_york_taxi_trips.tlc_yellow_trips_2022
+  WHERE pickup_datetime::DATE BETWEEN DATE '2022-11-23' AND DATE '2022-11-25'
   GROUP BY ALL
 ) t
 JOIN geo.main.zones z ON z.LocationID = t.pickup_location_id::INTEGER
 JOIN transit.main.daily_ridership r ON r.date::DATE = t.day
 ORDER BY t.day, z.Zone;
+-- 2022-11-23  JFK Airport        4975  3263998
+-- 2022-11-23  LaGuardia Airport  2728  3263998
+-- 2022-11-24  JFK Airport        3481  1382266
+-- 2022-11-24  LaGuardia Airport  1356  1382266
+-- 2022-11-25  JFK Airport        4544  2058658
+-- 2022-11-25  LaGuardia Airport  2785  2058658
 ```
 
 The filter holds on every source:

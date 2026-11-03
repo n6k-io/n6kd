@@ -39,6 +39,25 @@ The agent gets these tools: `list_servers`, `add_server`, `remove_server`,
 > How close is NYC subway ridership to pre-pandemic levels? Open a review of
 > JFK Airport in ops.zone_reviews with what you find.
 
-The agent lists the catalogs, attaches the ones it needs, and queries them.
-A write that `perms.yml` forbids comes back to the agent as a tool error, with
-the same message a DuckDB client gets.
+From a Claude Code run, condensed:
+
+```
+list_catalogs → nyc.geo, nyc.ops, nyc.transit
+attach transit, ops, geo
+query   SELECT * FROM geo.main.zones WHERE Zone ILIKE '%JFK%'
+        → 132, Queens, JFK Airport, Airports
+query   SELECT year(date) AS y, round(avg(subways_of_comparable_pre_pandemic_day), 3) AS avg_pct, ...
+        → 2022 0.613, 2023 0.7, 2024 0.724, 2025 0.752
+execute INSERT INTO ops.main.zone_reviews (id, location_id, note, status)
+        VALUES (1, 132, 'NYC subway ridership recovery ... 2024 avg 72% of comparable pre-pandemic day ...', 'open')
+```
+
+A write that `perms.yml` forbids comes back to the agent as a tool error. Asked
+to "delete every review in ops.zone_reviews":
+
+```
+execute DELETE FROM ops.main.zone_reviews
+        → Permission Error: crossing: 'zone_reviews' does not have 'delete' permission
+```
+
+The agent reported the refusal and changed nothing.

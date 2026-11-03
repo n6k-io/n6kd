@@ -4,8 +4,8 @@ With `--oidc-issuer-url`, each client signs in with a JWT, and the token's
 claims can be used in `perms.yml` as `$name`. One table, one policy, and each
 client sees and edits only its own rows.
 
-This is a pattern, not a runnable demo: it needs an OIDC issuer you control
-whose tokens carry an `email` claim and an `aud` of `n6kd`.
+You need an OIDC issuer whose tokens carry an `email` claim and an `aud` of
+`n6kd`.
 
 [`boot.sql`](boot.sql) creates two reviews, owned by `ada@example.com` and
 `grace@example.com`. [`perms.yml`](perms.yml):
@@ -44,5 +44,19 @@ SELECT id, note FROM ops.main.zone_reviews;
 
 With Grace's token the same query returns row 2 only.
 
+Ada cannot write rows for Grace, or touch hers:
+
+```sql
+INSERT INTO ops.main.zone_reviews VALUES (3, 1, 'Check Newark pickups', 'grace@example.com');
+-- Invalid Input Error: ... row violates the check predicate on this table
+
+UPDATE ops.main.zone_reviews SET note = 'edited' WHERE id = 2;
+-- succeeds, 0 rows
+
+DELETE FROM ops.main.zone_reviews WHERE id = 2;
+-- succeeds, 0 rows
+```
+
 A token that fails signature, `iss`, `aud` or `exp` checks is refused as
-`unauthorized`. A token without an `email` claim is refused at connect.
+`unauthorized`. A token without an `email` claim is refused with
+`internal error`.
