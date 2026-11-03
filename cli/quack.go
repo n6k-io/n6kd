@@ -17,9 +17,9 @@ func newQuackCmd() *cobra.Command {
 	var addr, token string
 
 	cmd := &cobra.Command{
-		Use:   "quack -f schema.sql [-f file.sql | -c SQL]... [--perms perms.yml]",
+		Use:   "quack -f schema.sql [-f file.sql | -t file.sql | -c SQL]... [--perms perms.yml]",
 		Short: "Serve the loaded database over DuckDB's quack protocol",
-		Long: "Runs the -f files and -c statements, in the order given, into a DuckDB\n" +
+		Long: "Runs the -f/-t files and -c statements, in the order given, into a DuckDB\n" +
 			"database and serves it to DuckDB clients over quack (ATTACH 'quack:host:port').\n\n" +
 			"With --perms, serves the one catalog perms.yml names, bridged. Without, serves\n" +
 			"the loaded database directly, read and write.\n\n" +

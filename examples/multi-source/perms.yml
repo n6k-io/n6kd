@@ -1,0 +1,19 @@
+catalogs:
+  taxi:
+    tables:
+      new_york_taxi_trips.tlc_yellow_trips_2022:
+        select: "pickup_location_id IN ('132','138')"
+  geo:
+    tables:
+      main.zones:
+        select: "Borough = 'Queens'"
+  transit:
+    tables:
+      main.daily_ridership:
+        select: true
+  ops:
+    tables:
+      main.zone_reviews:
+        select: true
+        insert: "status = 'open'"
+        update: { using: "status = 'open'", check: "status IN ('open', 'resolved')" }

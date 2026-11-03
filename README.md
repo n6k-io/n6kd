@@ -12,6 +12,13 @@ Installs the latest release, with its extensions, for Linux or macOS on amd64
 or arm64. `N6KD_VERSION` picks a release, `N6KD_HOME` where it is unpacked
 (`~/.n6kd`) and `N6KD_BIN_DIR` where the `n6kd` symlink goes (`~/.local/bin`).
 
+## Examples
+
+- [Quickstart](examples/quickstart/README.md): run n6kd locally on NYC data and control which rows clients see and what they can write. No account needed.
+- [Let an AI agent query it](examples/agent/README.md): point an MCP agent such as Claude Code at the quickstart server. It gets the same limits as any other client.
+- [Give each client its own rows](examples/per-client/README.md): sign clients in with OIDC so each sees and edits only its own rows. Needs an OIDC issuer.
+- [Combine BigQuery and local data](examples/multi-source/README.md): serve a BigQuery dataset next to local tables from one process and join across them. Cloud credentials stay on the server. Needs a Google Cloud project.
+
 ## Build
 
 ```sh
@@ -32,8 +39,17 @@ Tests skip when it is unset.
 n6kd -f schema.sql --perms perms.yml
 ```
 
-Boot SQL is run in the order given by `-f` (file) and `-c` (statement). Without
+Boot SQL is run in the order given by `-f` (file), `-t` (template file) and `-c` (statement). Without
 `--perms`, every catalog in the loaded database is served read/write, unbridged.
+
+A `-t` file is a `-f` file rendered with Go
+[`text/template`](https://pkg.go.dev/text/template) first, for values DuckDB
+only accepts as literals, such as `ATTACH` strings. `{{ env "NAME" }}` inserts
+an environment variable and fails the boot when it is unset:
+
+```sql
+ATTACH 'project=bigquery-public-data dataset=new_york_taxi_trips billing_project={{ env "BQ_BILLING_PROJECT" }}' AS taxi (TYPE bigquery);
+```
 
 With `--listen=<path>` (or `N6K_LISTEN=<path>`), n6kd listens on that Unix
 socket instead of `--addr` and serves every client that connects, each in its
@@ -47,6 +63,7 @@ dialing parent authenticates; the HELLO token is not checked, and `--api-key` /
 | Flag | Description |
 | --- | --- |
 | `-f, --file` | SQL file run at boot; repeatable |
+| `-t, --template` | SQL file rendered with Go `text/template`, then run at boot; repeatable |
 | `-c, --command` | SQL run at boot; repeatable |
 | `--perms` | perms.yml naming the catalogs to serve bridged |
 | `--addr` | listen address (default `:8080`, or `$PORT`) |

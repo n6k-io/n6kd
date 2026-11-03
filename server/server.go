@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/n6k-io/n6kd/engine"
+	"github.com/n6k-io/n6kd/internal/sqlquote"
 )
 
 const shutdownGrace = 10 * time.Second
@@ -85,7 +86,7 @@ func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLo
 		return err
 	}
 	authority := dialableAuthority(listener.Addr())
-	log.Info("ready — clients attach with:")
+	log.Info("ready, clients attach with:")
 	for _, catalog := range eng.Catalogs() {
 		log.Infof("  %s", attachStatement(authority, catalog))
 	}
@@ -114,14 +115,15 @@ func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLo
 	return nil
 }
 
-// attachStatement is what a client actually runs. The alias defaults to the
-// server-side catalog name, so a name every DuckDB already has — "memory",
-// which direct mode serves — must be given as the CATALOG option instead.
+// attachStatement is what a client actually runs. CATALOG picks the served
+// catalog; without it the server falls back to the alias. A name every DuckDB
+// already has, such as "memory" which direct mode serves, cannot be the alias.
 func attachStatement(authority, catalog string) string {
+	alias := catalog
 	if reservedNames[strings.ToLower(catalog)] {
-		return fmt.Sprintf("ATTACH 'n6k://%s' AS remote (TYPE n6k, CATALOG '%s')", authority, catalog)
+		alias = "remote"
 	}
-	return fmt.Sprintf("ATTACH 'n6k://%s' AS %s (TYPE n6k)", authority, catalog)
+	return fmt.Sprintf("ATTACH 'n6k://%s' AS %s (TYPE n6k, CATALOG %s)", authority, sqlquote.Ident(alias), sqlquote.String(catalog))
 }
 
 var reservedNames = map[string]bool{"memory": true, "system": true, "temp": true}

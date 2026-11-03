@@ -1,0 +1,8 @@
+catalogs:
+  ops:
+    tables:
+      main.zone_reviews:
+        select: "owner = $email"
+        insert: "owner = $email"
+        update: "owner = $email"
+        delete: "owner = $email"
