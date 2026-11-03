@@ -1,0 +1,3 @@
+INSTALL bigquery FROM community; LOAD bigquery;
+
+ATTACH 'project=bigquery-public-data dataset=new_york_taxi_trips billing_project={{ env "BQ_BILLING_PROJECT" }}' AS taxi (TYPE bigquery, READ_ONLY);

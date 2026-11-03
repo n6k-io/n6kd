@@ -39,9 +39,9 @@ func newRootCmd() *cobra.Command {
 	var pprofAddr string
 
 	cmd := &cobra.Command{
-		Use:   "n6kd -f schema.sql [-f file.sql | -c SQL]... [--perms perms.yml]",
+		Use:   "n6kd -f schema.sql [-f file.sql | -t file.sql | -c SQL]... [--perms perms.yml]",
 		Short: "Serve DuckDB catalogs over the n6k protocol",
-		Long: "Runs the -f files and -c statements, in the order given, into a DuckDB\n" +
+		Long: "Runs the -f/-t files and -c statements, in the order given, into a DuckDB\n" +
 			"database and serves the catalogs named in --perms to WebSocket clients.\n\n" +
 			"With no perms.yml at all, clients are served from the loaded database\n" +
 			"directly: every catalog it holds, read and write, unbridged.\n\n" +
@@ -154,10 +154,12 @@ type bootFlags struct {
 
 // limitScope says what --memory-limit and --threads apply to.
 func (f *bootFlags) register(flags *pflag.FlagSet, limitScope string) {
-	flags.VarP(&stepFlag{steps: &f.boot, file: true}, "file", "f",
-		"SQL file run into the source database at boot; repeatable, in order with -c")
-	flags.VarP(&stepFlag{steps: &f.boot}, "command", "c",
-		"SQL run into the source database at boot; repeatable, in order with -f")
+	flags.VarP(&stepFlag{steps: &f.boot, typ: "file", step: func(v string) engine.Step { return engine.Step{Path: v} }},
+		"file", "f", "SQL file run into the source database at boot; repeatable, in order with -t and -c")
+	flags.VarP(&stepFlag{steps: &f.boot, typ: "file", step: func(v string) engine.Step { return engine.Step{Path: v, Template: true} }},
+		"template", "t", "like -f, rendered first with Go text/template; {{ env \"NAME\" }} fails the boot when unset")
+	flags.VarP(&stepFlag{steps: &f.boot, typ: "sql", step: func(v string) engine.Step { return engine.Step{SQL: v} }},
+		"command", "c", "SQL run into the source database at boot; repeatable, in order with -f and -t")
 	flags.StringVar(&f.permsPath, "perms", "", "perms.yml naming the catalogs to serve bridged")
 	flags.BoolVar(&f.lockdown, "lockdown", os.Getenv("N6KD_NO_LOCKDOWN") == "",
 		"take the local filesystem and extension installation away from served connections")
@@ -167,7 +169,7 @@ func (f *bootFlags) register(flags *pflag.FlagSet, limitScope string) {
 	flags.IntVar(&f.threads, "threads", 0,
 		"threads locked in under --lockdown, "+limitScope+" (N6KD_THREADS); default DuckDB's")
 	flags.BoolVar(&f.bootOnly, "boot-only", false,
-		"run the -f files and -c statements, then exit without binding the listener")
+		"run the -f/-t files and -c statements, then exit without binding the listener")
 	flags.BoolVar(&f.debug, "debug", os.Getenv("N6KD_DEBUG") != "", "log per-connection and per-catalog detail")
 	flags.BoolVar(&f.jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
 		"log JSON lines with Cloud Logging severity fields, for log collectors")
@@ -192,7 +194,7 @@ func (f *bootFlags) resolve(cmd *cobra.Command) error {
 
 func (f *bootFlags) requireFiles() error {
 	if len(f.boot) == 0 {
-		return fmt.Errorf("no boot SQL given: pass -f or -c")
+		return fmt.Errorf("no boot SQL given: pass -f, -t or -c")
 	}
 	var paths []string
 	for _, step := range f.boot {
@@ -295,30 +297,22 @@ func newSelfTestCmd() *cobra.Command {
 	return cmd
 }
 
-// stepFlag appends to a slice shared between -f and -c, so the boot steps keep
-// the order the flags were given in rather than grouping by flag.
+// stepFlag appends to a slice shared between -f, -t and -c, so the boot steps
+// keep the order the flags were given in rather than grouping by flag.
 type stepFlag struct {
 	steps *[]engine.Step
-	file  bool
+	step  func(string) engine.Step
+	typ   string
 }
 
 func (s *stepFlag) Set(v string) error {
-	if s.file {
-		*s.steps = append(*s.steps, engine.Step{Path: v})
-	} else {
-		*s.steps = append(*s.steps, engine.Step{SQL: v})
-	}
+	*s.steps = append(*s.steps, s.step(v))
 	return nil
 }
 
 func (s *stepFlag) String() string { return "" }
 
-func (s *stepFlag) Type() string {
-	if s.file {
-		return "file"
-	}
-	return "sql"
-}
+func (s *stepFlag) Type() string { return s.typ }
 
 // defaultAddr honours PORT, which hosts like Cloud Run set to choose the port.
 // --addr still wins, and takes a host as well.

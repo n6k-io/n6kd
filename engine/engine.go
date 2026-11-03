@@ -132,11 +132,13 @@ func sessionDSN(opts Options) string {
 	return dsn
 }
 
-// Step is one unit of boot SQL: a file (-f) or inline statements (-c).
+// Step is one unit of boot SQL: a file (-f, or -t when Template) or inline statements (-c).
 // Exactly one field is set.
 type Step struct {
 	Path string
 	SQL  string
+	// Path is rendered with text/template before it runs.
+	Template bool
 }
 
 type Options struct {

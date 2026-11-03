@@ -159,7 +159,7 @@ func (u *setIntervalUDF) begin(task *intervalTask) (context.Context, error) {
 	defer u.mu.Unlock()
 
 	if !u.armed {
-		return nil, errors.New("n6kd_set_interval is only available in boot SQL (-f/-c)")
+		return nil, errors.New("n6kd_set_interval is only available in boot SQL (-f/-t/-c)")
 	}
 	if u.running > 0 {
 		return nil, fmt.Errorf("n6kd_set_interval(%q): cannot be called while another body runs", task.name)

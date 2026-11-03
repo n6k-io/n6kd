@@ -1,0 +1,15 @@
+catalogs:
+  geo:
+    tables:
+      main.zones:
+        select: "Borough = 'Queens'"
+  transit:
+    tables:
+      main.daily_ridership:
+        select: true
+  ops:
+    tables:
+      main.zone_reviews:
+        select: true
+        insert: "status = 'open'"
+        update: { using: "status = 'open'", check: "status IN ('open', 'resolved')" }
