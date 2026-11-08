@@ -43,6 +43,12 @@ func (e *Engine) ServeQuack(ctx context.Context, uri, token string, allowOtherHo
 			return "", "", err
 		}
 	}
+	// quack_serve initializes the secret manager, which then refuses this setting.
+	if e.opts.Lockdown {
+		if _, err := db.ExecContext(ctx, "SET allow_persistent_secrets=false"); err != nil {
+			return "", "", fmt.Errorf("disable persistent secrets: %w", err)
+		}
+	}
 	args := sqlquote.String(uri) + ", token := " + sqlquote.String(token)
 	if allowOtherHost {
 		args += ", allow_other_hostname := true"

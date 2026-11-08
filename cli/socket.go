@@ -27,8 +27,8 @@ func openSocketMode(authn authFlags, listenPath string) (socketMode, error) {
 	if listenPath == "" {
 		return none, nil
 	}
-	if authn.apiKey != "" || authn.issuerURL != "" || authn.audience != "" {
-		return none, fmt.Errorf("--api-key, --oidc-issuer-url and --oidc-audience cannot be used with --listen (%s): the parent dialing in authenticates",
+	if authn.apiKey != "" || authn.issuerURL != "" || authn.audience != "" || authn.clientID != "" {
+		return none, fmt.Errorf("--api-key, --oidc-issuer-url, --oidc-audience and --oidc-client-id cannot be used with --listen (%s): the parent dialing in authenticates",
 			server.ListenEnv)
 	}
 	ln, err := server.ListenSocket(listenPath)

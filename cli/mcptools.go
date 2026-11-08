@@ -105,7 +105,7 @@ func (s *mcpSession) catalogsOf(ctx context.Context, sc *serverConn) ([]string, 
 	if err := s.connect(ctx, sc); err != nil {
 		return nil, err
 	}
-	rows, err := s.conn.QueryContext(ctx, "SELECT catalog_name FROM n6k_list_catalogs(wsFd => ?) ORDER BY 1", sc.link.extFD)
+	rows, err := s.conn.QueryContext(ctx, "SELECT catalog_name FROM n6k_list_catalogs(connection => ?::UUID) ORDER BY 1", sc.id)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func (s *mcpSession) attach(ctx context.Context, _ *mcp.CallToolRequest, in atta
 	if err := s.connect(ctx, sc); err != nil {
 		return nil, nil, err
 	}
-	stmt, err := s.attachOverLink(ctx, sc, alias, in.Catalog)
+	stmt, err := s.attachCatalog(ctx, sc, alias, in.Catalog)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -28,6 +29,18 @@ type Config struct {
 	// MCP, when set, is served on each websocket's text frames to clients that offer `mcp`.
 	MCP   *mcp.Server
 	Serve ServeOptions
+	// ProtectedResource, when set, is served at ProtectedResourcePath.
+	ProtectedResource *ProtectedResource
+}
+
+const ProtectedResourcePath = "/.well-known/oauth-protected-resource"
+
+// ProtectedResource is RFC 9728 metadata. client_id is not part of the RFC: it
+// names the client n6kd auth login signs in with.
+type ProtectedResource struct {
+	Resource             string   `json:"resource"`
+	AuthorizationServers []string `json:"authorization_servers"`
+	ClientID             string   `json:"client_id"`
 }
 
 // ServeOptions apply per connection. Zero leaves a setting at the extension's
@@ -165,6 +178,15 @@ func newRouter(cfg Config, eng *engine.Engine, log *zap.SugaredLogger) http.Hand
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+
+	if cfg.ProtectedResource != nil {
+		r.Get(ProtectedResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(cfg.ProtectedResource); err != nil {
+				log.Errorf("write %s: %v", ProtectedResourcePath, err)
+			}
+		})
+	}
 
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
 		serveWS(w, r, checkOrigin, eng, cfg.MCP, cfg.Serve, log)

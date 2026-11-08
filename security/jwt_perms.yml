@@ -1,0 +1,4 @@
+catalogs:
+  app:
+    tables:
+      main.owned: {select: "owner = $sub"}

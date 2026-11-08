@@ -14,13 +14,28 @@ import (
 	"github.com/n6k-io/n6kd/auth"
 	"github.com/n6k-io/n6kd/engine"
 	"github.com/n6k-io/n6kd/internal/sqlquote"
+	"github.com/n6k-io/n6kd/server"
 )
 
 type authFlags struct {
-	apiKey, issuerURL, audience string
+	apiKey, issuerURL, audience, clientID string
+}
+
+func (f authFlags) protectedResource() *server.ProtectedResource {
+	if f.clientID == "" {
+		return nil
+	}
+	return &server.ProtectedResource{
+		Resource:             f.audience,
+		AuthorizationServers: []string{f.issuerURL},
+		ClientID:             f.clientID,
+	}
 }
 
 func (f authFlags) verifier(ctx context.Context, log *zap.SugaredLogger) (engine.TokenVerifier, error) {
+	if f.clientID != "" && f.issuerURL == "" {
+		return nil, fmt.Errorf("--oidc-client-id needs --oidc-issuer-url and --oidc-audience")
+	}
 	if f.issuerURL == "" && f.audience == "" {
 		if f.apiKey == "" {
 			log.Warnf("no --api-key or --oidc-issuer-url given: any client that can reach the port is served")
@@ -58,22 +73,27 @@ func newLoginCmd() *cobra.Command {
 	var debugLogs, jsonLogs bool
 
 	cmd := &cobra.Command{
-		Use:   "login (--issuer URL [--client-id ID] [--resource AUD] | --server URL --api-key KEY)",
-		Short: "Store the persistent secret n6kd mcp connects with",
-		Long: "With --issuer, runs n6k_login, the n6k_client device login, which stores a persistent\n" +
+		Use:   "login (SERVER | --issuer URL [--client-id ID] [--resource AUD] | --server URL --api-key KEY)",
+		Short: "Store the persistent secret n6k clients connect with",
+		Long: "With SERVER (host[:port] or a URL), asks that server which issuer it trusts, runs the\n" +
+			"device login there, and stores the refresh token as a persistent n6k_refresh secret\n" +
+			"scoped to the server's host:port. A later ATTACH or n6kd mcp mints its token from it.\n" +
+			"With --issuer, runs n6k_login, the n6k_client device login, which stores a persistent\n" +
 			"n6k_refresh secret; n6kd mcp mints its connect token from that secret for every server.\n" +
 			"With --server and --api-key, stores that key as a persistent n6k secret scoped to the\n" +
 			"server's host:port, which n6kd mcp presents to that server as is.",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, targets []string) error {
 			cmd.SilenceUsage = true
 			switch {
+			case len(targets) == 1 && (issuer != "" || server != "" || apiKey != ""):
+				return errors.New("SERVER cannot be used with --issuer, --server or --api-key")
 			case issuer != "" && (server != "" || apiKey != ""):
 				return errors.New("--issuer cannot be used with --server or --api-key")
 			case issuer == "" && (server == "") != (apiKey == ""):
 				return errors.New("--server and --api-key must be given together")
-			case issuer == "" && server == "":
-				return errors.New("--issuer, or --server with --api-key, is required")
+			case len(targets) == 0 && issuer == "" && server == "":
+				return errors.New("SERVER, --issuer, or --server with --api-key, is required")
 			}
 
 			log, err := installLogger(debugLogs, jsonLogs)
@@ -88,6 +108,9 @@ func newLoginCmd() *cobra.Command {
 			}
 			defer func() { _ = db.Close() }()
 
+			if len(targets) == 1 {
+				return loginToServer(cmd, db, targets[0])
+			}
 			if server != "" {
 				return storeAPIKey(cmd, db, server, apiKey)
 			}

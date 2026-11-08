@@ -1,0 +1,5 @@
+catalogs:
+  app:
+    tables:
+      main.a: {select: "k < 5"}
+      main.b: {select: true}

@@ -114,6 +114,7 @@ func newRootCmd() *cobra.Command {
 			if socket.serve != nil {
 				return socket.serve(cmd.Context(), eng, cfg.Serve, log)
 			}
+			cfg.ProtectedResource = authn.protectedResource()
 			return server.Run(cmd.Context(), cfg, eng, log)
 		},
 	}
@@ -136,6 +137,8 @@ func newRootCmd() *cobra.Command {
 		"OIDC issuer whose JWTs clients must present; their claims become $name context in perms.yml")
 	cmd.Flags().StringVar(&authn.audience, "oidc-audience", os.Getenv("N6KD_OIDC_AUDIENCE"),
 		"aud claim a client's JWT must carry; required with --oidc-issuer-url")
+	cmd.Flags().StringVar(&authn.clientID, "oidc-client-id", os.Getenv("N6KD_OIDC_CLIENT_ID"),
+		"public client that n6kd auth login signs users in with; advertised at "+server.ProtectedResourcePath)
 	cmd.SetErrPrefix("n6kd:")
 	return cmd
 }

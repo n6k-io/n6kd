@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -247,7 +248,7 @@ func TestMCPConnectsWithScopedSecret(t *testing.T) {
 
 	attached := mustCallTool(t, cs, "attach", map[string]any{"server": "orders", "catalog": "app", "alias": "remote"})
 	for _, want := range []string{
-		"ran `ATTACH '' AS \"remote\" (TYPE n6k, wsFd ",
+		"ran `ATTACH '' AS \"remote\" (TYPE n6k, CONNECTION '",
 		"CATALOG 'app')` successfully",
 		"\n\nremote.main.orders: id INTEGER, owner VARCHAR",
 	} {
@@ -433,6 +434,159 @@ func TestMCPTwoServers(t *testing.T) {
 	}
 }
 
+type dropProxy struct {
+	listener net.Listener
+	mu       sync.Mutex
+	live     []net.Conn
+}
+
+func startDropProxy(t *testing.T, target string) *dropProxy {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &dropProxy{listener: listener}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		p.drop()
+	})
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := net.Dial("tcp", target)
+			if err != nil {
+				_ = client.Close()
+				continue
+			}
+			p.mu.Lock()
+			p.live = append(p.live, client, upstream)
+			p.mu.Unlock()
+			go func() { _, _ = io.Copy(upstream, client); _ = upstream.Close() }()
+			go func() { _, _ = io.Copy(client, upstream); _ = client.Close() }()
+		}
+	}()
+	return p
+}
+
+func (p *dropProxy) drop() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, conn := range p.live {
+		_ = conn.Close()
+	}
+	p.live = nil
+}
+
+func startUsersEchoServer(t *testing.T) string {
+	t.Helper()
+	requireExtensions(t)
+	schemaPath := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte(`
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);
+INSERT INTO app.main.users VALUES (1, 'Ada'), (2, 'Grace');
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := perms.Parse([]byte("catalogs:\n  app:\n    tables:\n      main.users:\n        select: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startEchoServer(t, engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, APIKey: "s3cret"})
+}
+
+func TestMCPRecoversFromDroppedConnection(t *testing.T) {
+	direct := startUsersEchoServer(t)
+	proxy := startDropProxy(t, strings.TrimSuffix(strings.TrimPrefix(direct, "ws://"), "/ws"))
+	url := "ws://" + proxy.listener.Addr().String() + "/ws"
+	loginAPIKey(t, url, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"users": url})
+
+	const count, wantCount = "SELECT count(*) AS n FROM remote.main.users", "n\n2\n(1 row)"
+	echoArgs := map[string]any{"text": "hi"}
+	mustCallTool(t, cs, "attach", map[string]any{"server": "users", "catalog": "app", "alias": "remote"})
+	if got := mustCallTool(t, cs, "query", map[string]any{"sql": count}); got != wantCount {
+		t.Fatalf("query before the drop %q", got)
+	}
+	if got := mustCallTool(t, cs, "users_echo", echoArgs); got != "echo: hi" {
+		t.Fatalf("echo before the drop %q", got)
+	}
+
+	proxy.drop()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(mustCallTool(t, cs, "list_servers", nil), ", disconnected,") {
+		if time.Now().After(deadline) {
+			t.Fatal("list_servers never showed the drop")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := mustCallTool(t, cs, "users_echo", echoArgs); got != "echo: hi" {
+		t.Errorf("echo after the drop %q", got)
+	}
+	if got := mustCallTool(t, cs, "query", map[string]any{"sql": count}); got != wantCount {
+		t.Errorf("query after the drop %q", got)
+	}
+	if got := mustCallTool(t, cs, "list_servers", nil); got != "users: "+url+", connected, 1 tool, attached: remote" {
+		t.Errorf("list_servers after the drop %q", got)
+	}
+}
+
+func TestMCPRemoveServerClosesConnection(t *testing.T) {
+	url := startUsersEchoServer(t)
+	loginAPIKey(t, url, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"users": url})
+
+	const connections = "SELECT count(*) AS n FROM n6k_connections()"
+	mustCallTool(t, cs, "attach", map[string]any{"server": "users", "catalog": "app", "alias": "remote"})
+	if got := mustCallTool(t, cs, "query", map[string]any{"sql": connections}); got != "n\n1\n(1 row)" {
+		t.Fatalf("connections before remove_server %q", got)
+	}
+	mustCallTool(t, cs, "remove_server", map[string]any{"name": "users"})
+	if got := mustCallTool(t, cs, "query", map[string]any{"sql": connections}); got != "n\n0\n(1 row)" {
+		t.Errorf("connections after remove_server %q", got)
+	}
+}
+
+func TestMCPSameURLUnderTwoNames(t *testing.T) {
+	url := startUsersEchoServer(t)
+	loginAPIKey(t, url, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"first": url})
+
+	_, err := callTool(t, cs, "add_server", map[string]any{"name": "second", "url": url})
+	if err == nil || !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("add_server got %v, want an already open error", err)
+	}
+	if got := mustCallTool(t, cs, "first_echo", map[string]any{"text": "hi"}); got != "echo: hi" {
+		t.Errorf("echo on the first server %q", got)
+	}
+}
+
+func TestExtensionURL(t *testing.T) {
+	for raw, want := range map[string]string{
+		"ws://host:1/ws":            "n6k://host:1",
+		"wss://host/prefix/ws":      "n6ks://host/prefix",
+		"ws://host:1/ws?catalogs=a": "n6k://host:1?catalogs=a",
+		"ws://host:1/other":         "",
+		"http://host:1/ws":          "",
+	} {
+		got, err := extensionURL(raw)
+		if want == "" {
+			if err == nil {
+				t.Errorf("%s: got %q, want an error", raw, got)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("%s: got %q, %v; want %q", raw, got, err, want)
+		}
+	}
+}
+
 func TestMCPConfigIsStrict(t *testing.T) {
 	for _, test := range []struct {
 		yaml, want string
@@ -460,7 +614,8 @@ func TestAuthLoginFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"login"}, "--issuer, or --server with --api-key, is required"},
+		{[]string{"login"}, "SERVER, --issuer, or --server with --api-key, is required"},
+		{[]string{"login", "h:1", "--issuer", "https://i"}, "SERVER cannot be used with --issuer, --server or --api-key"},
 		{[]string{"login", "--server", "ws://h:1/ws"}, "--server and --api-key must be given together"},
 		{[]string{"login", "--issuer", "https://i", "--api-key", "k"}, "--issuer cannot be used with --server or --api-key"},
 	} {

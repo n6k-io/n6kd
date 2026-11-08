@@ -22,12 +22,20 @@ Results are in [results.md](results.md).
 
 ```sh
 go build -o n6kd . && ./n6kd install
-ROWS=1000000 N=5 bench/run.py
+bench/run.py > bench/results.md
 ```
 
 run.py also checks every answer against a local copy of the data (see
-`fingerprint` in run.py). A wrong answer shows as `✗ result differs`.
+`fingerprint` in run.py). A wrong answer shows as `✗ result differs`. A query with
+a `.reset` file changes data, and the reset restores it after each run.
 
-To use local extension builds, set `N6K_EXTENSION_DIR` (see the top-level README)
-and `N6K_CLIENT=<path>/n6k_client.duckdb_extension`. run.py runs under `uv`
-with the `duckdb` package pinned to the version n6kd embeds, and checks this.
+Native on the two-server join is two in-process databases, so it is a best-case
+floor, not like-for-like. Quack serves one catalog, so the two-catalog join is
+`n/a` for it. Throughput runs without perms.
+
+Behavior, as opposed to speed, is in [`compat/`](../compat/README.md).
+
+To use local extension builds, set `N6K_EXTENSION_DIR` (see the top-level README),
+in the environment or in the repo's `.env`. run.py runs under `uv` with the `duckdb`
+package pinned to the version n6kd embeds, and checks this. Ports 8081-8088 must be
+free.

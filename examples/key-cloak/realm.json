@@ -1,0 +1,96 @@
+{
+  "realm": "n6k",
+  "enabled": true,
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "providerId": "declarative-user-profile",
+        "config": {
+          "kc.user.profile.config": [
+            "{\"unmanagedAttributePolicy\":\"ADMIN_EDIT\",\"attributes\":[{\"name\":\"username\"},{\"name\":\"email\"},{\"name\":\"firstName\"},{\"name\":\"lastName\"}]}"
+          ]
+        }
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "n6k-cli",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "aud-n6kd",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "n6kd",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "region",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "region",
+            "claim.name": "region",
+            "jsonType.label": "String",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "grace",
+      "email": "grace@example.com",
+      "emailVerified": true,
+      "firstName": "Grace",
+      "lastName": "Hopper",
+      "enabled": true,
+      "attributes": {
+        "region": [
+          "east"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "offline_access"
+      ]
+    },
+    {
+      "username": "linus",
+      "email": "linus@example.com",
+      "emailVerified": true,
+      "firstName": "Linus",
+      "lastName": "Torvalds",
+      "enabled": true,
+      "attributes": {
+        "region": [
+          "west"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "offline_access"
+      ]
+    }
+  ]
+}

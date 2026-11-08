@@ -70,9 +70,20 @@ func runMCP(ctx context.Context, configPath string, transport mcp.Transport, log
 		return err
 	}
 	defer func() { err = errors.Join(err, conn.Close()) }()
+	sendConn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, sendConn.Close()) }()
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "n6kd", Version: buildVersion()}, nil)
-	session := &mcpSession{conn: conn, server: server, configPath: configPath, log: log, servers: map[string]*serverConn{}}
+	session := &mcpSession{
+		conn: conn, sendConn: sendConn, texts: newTextRoutes(),
+		server: server, configPath: configPath, log: log, servers: map[string]*serverConn{},
+	}
+	if err := session.texts.register(conn); err != nil {
+		return err
+	}
 	session.register(server)
 	defer func() { err = errors.Join(err, session.disconnectAll(context.WithoutCancel(ctx))) }()
 
@@ -89,6 +100,8 @@ func runMCP(ctx context.Context, configPath string, transport mcp.Transport, log
 type mcpSession struct {
 	mu         sync.Mutex
 	conn       *sql.Conn
+	sendConn   *sql.Conn
+	texts      *textRoutes
 	server     *mcp.Server
 	configPath string
 	log        *zap.SugaredLogger
@@ -97,7 +110,8 @@ type mcpSession struct {
 
 type serverConn struct {
 	name, url   string
-	link        *wsLink
+	id          string
+	servesMCP   bool
 	remote      *mcp.ClientSession
 	remoteTools []string
 	attached    map[string]string
@@ -116,62 +130,91 @@ func (s *mcpSession) lookup(name string) (*serverConn, error) {
 }
 
 func (s *mcpSession) connect(ctx context.Context, sc *serverConn) error {
-	if sc.link != nil && sc.link.alive() {
+	if sc.id != "" {
+		alive, found, err := s.connState(ctx, sc.id)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !found:
+			s.forgetConnection(sc)
+		case !alive:
+			s.log.Warnf("%s: connection to %s dropped; reconnecting", sc.name, sc.url)
+			if err := s.disconnectRemote(sc); err != nil {
+				s.log.Warnf("%s: closing the dropped mcp session: %v", sc.name, err)
+			}
+			// on_close runs on the extension's own thread: if it landed after the redial it would end the new session.
+			s.texts.awaitClose(ctx, sc.id)
+			if err := s.conn.QueryRowContext(ctx,
+				"SELECT list_contains(capabilities, 'mcp') FROM n6k_reconnect(?)", sc.id).Scan(&sc.servesMCP); err != nil {
+				return fmt.Errorf("reconnect to %s: %w", sc.url, err)
+			}
+			s.log.Infof("%s: reconnected to %s", sc.name, sc.url)
+		}
+	}
+	if sc.id == "" {
+		if err := s.openConnection(ctx, sc); err != nil {
+			return err
+		}
+	}
+	if !sc.servesMCP || s.texts.has(sc.id) {
 		return nil
 	}
-	if sc.link != nil {
-		s.log.Warnf("%s: connection to %s dropped (%v); reconnecting", sc.name, sc.url, sc.link.err)
-		if err := s.disconnect(ctx, sc); err != nil {
-			s.log.Warnf("%s: tearing down the dropped connection: %v", sc.name, err)
-		}
+	if err := s.disconnectRemote(sc); err != nil {
+		s.log.Warnf("%s: closing the dropped mcp session: %v", sc.name, err)
 	}
+	return s.connectRemote(ctx, sc)
+}
 
-	scope, err := serverScope(sc.url)
+func (s *mcpSession) openConnection(ctx context.Context, sc *serverConn) error {
+	target, err := extensionURL(sc.url)
 	if err != nil {
 		return err
 	}
-	link, err := dialLink(ctx, sc.url)
-	if err != nil {
-		return err
-	}
-	var connected, servesMCP bool
 	if err := s.conn.QueryRowContext(ctx,
-		"SELECT connected, list_contains(capabilities, 'mcp') FROM n6k_connect(wsFd => ?, scope => ?)",
-		link.extFD, scope).Scan(&connected, &servesMCP); err != nil {
-		return errors.Join(fmt.Errorf("connect to %s: %w", sc.url, err), link.close(true))
+		"SELECT connection_id::VARCHAR, list_contains(capabilities, 'mcp') FROM n6k_connect(url => ?, on_text => '"+onTextUDF+"', on_close => '"+onCloseUDF+"')",
+		target).Scan(&sc.id, &sc.servesMCP); err != nil {
+		return fmt.Errorf("connect to %s: %w", sc.url, err)
 	}
-	sc.link = link
 	s.log.Infof("%s: connected to %s", sc.name, sc.url)
+	return nil
+}
 
-	var errs []error
-	for alias, catalog := range sc.attached {
-		if _, err := s.attachOverLink(ctx, sc, alias, catalog); err != nil {
-			delete(sc.attached, alias)
-			errs = append(errs, err)
-		}
+func (s *mcpSession) connState(ctx context.Context, id string) (alive, found bool, err error) {
+	err = s.conn.QueryRowContext(ctx,
+		"SELECT alive FROM n6k_connections() WHERE connection_id = ?::UUID", id).Scan(&alive)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
 	}
-	if servesMCP {
-		if err := s.connectRemote(ctx, sc); err != nil {
-			errs = append(errs, err)
-		}
+	if err != nil {
+		return false, false, err
 	}
-	return errors.Join(errs...)
+	return alive, true, nil
+}
+
+// A connection only leaves n6k_connections with its last lease, so no catalog is still attached over it.
+func (s *mcpSession) forgetConnection(sc *serverConn) {
+	if err := s.disconnectRemote(sc); err != nil {
+		s.log.Warnf("%s: closing the mcp session: %v", sc.name, err)
+	}
+	s.texts.close(sc.id)
+	sc.id = ""
+	clear(sc.attached)
 }
 
 func (s *mcpSession) disconnect(ctx context.Context, sc *serverConn) error {
-	if sc.link == nil {
+	if sc.id == "" {
 		return nil
 	}
 	remoteErr := s.disconnectRemote(sc)
-	detached := true
 	for alias := range sc.attached {
 		if _, err := s.conn.ExecContext(ctx, "DETACH DATABASE IF EXISTS "+sqlquote.Ident(alias)); err != nil {
-			s.log.Warnf("%s: detach %s: %v; keeping fd %d open so its number is not reused", sc.name, alias, err, sc.link.extFD)
-			detached = false
+			s.log.Warnf("%s: detach %s: %v; its lease keeps the connection open", sc.name, alias, err)
 		}
 	}
-	err := sc.link.close(detached)
-	sc.link = nil
+	s.texts.close(sc.id)
+	_, err := s.conn.ExecContext(ctx, "SELECT * FROM n6k_disconnect(?)", sc.id)
+	sc.id = ""
 	return errors.Join(remoteErr, err)
 }
 
@@ -185,8 +228,8 @@ func (s *mcpSession) disconnectAll(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (s *mcpSession) attachOverLink(ctx context.Context, sc *serverConn, alias, catalog string) (string, error) {
-	stmt := fmt.Sprintf("ATTACH '' AS %s (TYPE n6k, wsFd %d, CATALOG %s)", sqlquote.Ident(alias), sc.link.extFD, sqlquote.String(catalog))
+func (s *mcpSession) attachCatalog(ctx context.Context, sc *serverConn, alias, catalog string) (string, error) {
+	stmt := fmt.Sprintf("ATTACH '' AS %s (TYPE n6k, CONNECTION %s, CATALOG %s)", sqlquote.Ident(alias), sqlquote.String(sc.id), sqlquote.String(catalog))
 	if _, err := s.conn.ExecContext(ctx, stmt); err != nil {
 		return stmt, fmt.Errorf("`%s` failed: %w", stmt, err)
 	}

@@ -17,6 +17,9 @@ import (
 type Issuer struct {
 	URL    string
 	signer jose.Signer
+	// LoginAudience and LoginClaims are what tokens from the device and refresh grants carry.
+	LoginAudience string
+	LoginClaims   map[string]any
 }
 
 func NewIssuer(t *testing.T) *Issuer {
@@ -39,7 +42,34 @@ func NewIssuer(t *testing.T) *Issuer {
 			"issuer":                                issuer.URL,
 			"jwks_uri":                              issuer.URL + "/jwks",
 			"id_token_signing_alg_values_supported": []string{"EdDSA"},
+			"device_authorization_endpoint":         issuer.URL + "/device",
+			"token_endpoint":                        issuer.URL + "/token",
 		})
+	})
+	mux.HandleFunc("/device", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{
+			"device_code":      "device-code",
+			"user_code":        "TEST-CODE",
+			"verification_uri": issuer.URL + "/activate",
+			"expires_in":       60,
+			"interval":         1,
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		switch r.PostForm.Get("grant_type") {
+		case "urn:ietf:params:oauth:grant-type:device_code", "refresh_token":
+			writeJSON(t, w, map[string]any{
+				"access_token":  issuer.Token(t, issuer.LoginAudience, issuer.LoginClaims),
+				"token_type":    "Bearer",
+				"refresh_token": "refresh-token",
+			})
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(t, w, map[string]any{"error": "unsupported_grant_type"})
+		}
 	})
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{

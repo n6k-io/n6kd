@@ -2,17 +2,150 @@ package cli
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"fmt"
+	"sync"
+	"time"
 
+	"github.com/duckdb/duckdb-go/v2"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/n6k-io/n6kd/internal/wstext"
 )
 
 // Skips server/discover, which servers on the text-frame transport are not known to answer.
 const remoteProtocolVersion = "2025-11-25"
 
+const (
+	onTextUDF  = "n6kd_on_text"
+	onCloseUDF = "n6kd_on_close"
+
+	onCloseWait = time.Second
+)
+
+type textRoute struct {
+	conn   *wstext.Conn
+	closed chan struct{}
+}
+
+// textRoutes maps connection ids to their MCP sessions. The UDFs run on the
+// extension's threads, so nothing here may wait on mcpSession.mu.
+type textRoutes struct {
+	mu     sync.Mutex
+	routes map[string]*textRoute
+}
+
+func newTextRoutes() *textRoutes {
+	return &textRoutes{routes: map[string]*textRoute{}}
+}
+
+func (r *textRoutes) register(conn *sql.Conn) error {
+	if err := duckdb.RegisterScalarUDF(conn, onTextUDF, connectionUDF(r.deliver)); err != nil {
+		return fmt.Errorf("register %s: %w", onTextUDF, err)
+	}
+	onClose := func(id, _ string) { r.close(id) }
+	if err := duckdb.RegisterScalarUDF(conn, onCloseUDF, connectionUDF(onClose)); err != nil {
+		return fmt.Errorf("register %s: %w", onCloseUDF, err)
+	}
+	return nil
+}
+
+func (r *textRoutes) open(id string, writer wstext.Writer) *wstext.Conn {
+	conn := wstext.New(writer)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.routes[id] = &textRoute{conn: conn, closed: make(chan struct{})}
+	return conn
+}
+
+func (r *textRoutes) has(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.routes[id]
+	return ok
+}
+
+func (r *textRoutes) deliver(id, text string) {
+	r.mu.Lock()
+	route, ok := r.routes[id]
+	r.mu.Unlock()
+	if ok {
+		route.conn.Deliver([]byte(text))
+	}
+}
+
+func (r *textRoutes) close(id string) {
+	r.mu.Lock()
+	route, ok := r.routes[id]
+	delete(r.routes, id)
+	r.mu.Unlock()
+	if ok {
+		_ = route.conn.Close()
+		close(route.closed)
+	}
+}
+
+func (r *textRoutes) awaitClose(ctx context.Context, id string) {
+	r.mu.Lock()
+	route, ok := r.routes[id]
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	select {
+	case <-route.closed:
+	case <-time.After(onCloseWait):
+		r.close(id)
+	case <-ctx.Done():
+		r.close(id)
+	}
+}
+
+// connectionUDF is the (connection_id UUID, text VARCHAR) shape the extension calls.
+type connectionUDF func(id, text string)
+
+func (f connectionUDF) Config() duckdb.ScalarFuncConfig {
+	id, err := duckdb.NewTypeInfo(duckdb.TYPE_UUID)
+	if err != nil {
+		panic(err)
+	}
+	text, err := duckdb.NewTypeInfo(duckdb.TYPE_VARCHAR)
+	if err != nil {
+		panic(err)
+	}
+	return duckdb.ScalarFuncConfig{InputTypeInfos: []duckdb.TypeInfo{id, text}, ResultTypeInfo: text, Volatile: true}
+}
+
+func (f connectionUDF) Executor() duckdb.ScalarFuncExecutor {
+	return duckdb.ScalarFuncExecutor{RowExecutor: func(values []driver.Value) (any, error) {
+		var id duckdb.UUID
+		if err := id.Scan(values[0]); err != nil {
+			return nil, err
+		}
+		text, ok := values[1].(string)
+		if !ok {
+			return nil, fmt.Errorf("text argument is %T", values[1])
+		}
+		f(id.String(), text)
+		return nil, nil
+	}}
+}
+
+type textSender struct {
+	conn *sql.Conn
+	id   string
+}
+
+func (w textSender) WriteMessage(_ int, data []byte) error {
+	_, err := w.conn.ExecContext(context.Background(), "SELECT * FROM n6k_send_text(?, ?)", w.id, string(data))
+	return err
+}
+
 func (s *mcpSession) connectRemote(ctx context.Context, sc *serverConn) error {
 	client := mcp.NewClient(&mcp.Implementation{Name: "n6kd", Version: buildVersion()}, nil)
-	remote, err := client.Connect(ctx, sc.link.text, &mcp.ClientSessionOptions{ProtocolVersion: remoteProtocolVersion})
+	text := s.texts.open(sc.id, textSender{conn: s.sendConn, id: sc.id})
+	remote, err := client.Connect(ctx, text, &mcp.ClientSessionOptions{ProtocolVersion: remoteProtocolVersion})
 	if err != nil {
 		return fmt.Errorf("mcp session with %s: %w", sc.url, err)
 	}
