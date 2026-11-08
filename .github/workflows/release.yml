@@ -44,7 +44,6 @@ jobs:
           - { os: linux, arch: amd64, runner: ubuntu-latest, container: "golang:1.26-bookworm" }
           - { os: linux, arch: arm64, runner: ubuntu-24.04-arm, container: "golang:1.26-bookworm" }
           - { os: darwin, arch: arm64, runner: macos-latest }
-          - { os: darwin, arch: amd64, runner: macos-15-intel }
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     env:
