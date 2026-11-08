@@ -1,0 +1,4 @@
+catalogs:
+  app:
+    tables:
+      main.b: {select: true}

@@ -13,7 +13,7 @@ import (
 	"github.com/n6k-io/n6kd/internal/textfmt"
 )
 
-func (s *mcpSession) listServers(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+func (s *mcpSession) listServers(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -24,8 +24,14 @@ func (s *mcpSession) listServers(_ context.Context, _ *mcp.CallToolRequest, _ st
 	for _, name := range slices.Sorted(maps.Keys(s.servers)) {
 		sc := s.servers[name]
 		state := "disconnected"
-		if sc.link != nil && sc.link.alive() {
-			state = "connected"
+		if sc.id != "" {
+			alive, _, err := s.connState(ctx, sc.id)
+			if err != nil {
+				return nil, nil, err
+			}
+			if alive {
+				state = "connected"
+			}
 		}
 		attached := "none"
 		if len(sc.attached) > 0 {

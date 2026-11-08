@@ -26,3 +26,4 @@ coverage.txt
 *.log
 
 examples/server/deploy.sh
+*.pyc

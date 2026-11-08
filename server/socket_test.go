@@ -59,13 +59,13 @@ func attachOverFD(t *testing.T, fd int, token string) *sql.DB {
 		t.Fatal(err)
 	}
 	loadClientExtension(t, db)
-	var connected bool
+	var id string
 	if err := db.QueryRowContext(t.Context(),
-		"SELECT connected FROM n6k_connect(wsFd => ?, token => ?)", fd, token).Scan(&connected); err != nil {
+		"SELECT connection_id::VARCHAR FROM n6k_connect(wsFd => ?, token => ?)", fd, token).Scan(&id); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	if _, err := db.ExecContext(t.Context(),
-		fmt.Sprintf("ATTACH '' AS remote (TYPE n6k, wsFd %d, CATALOG 'memory')", fd)); err != nil {
+		fmt.Sprintf("ATTACH '' AS remote (TYPE n6k, CONNECTION '%s', CATALOG 'memory')", id)); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	return db
@@ -86,9 +86,9 @@ func connectOverSocket(t *testing.T, path string) error {
 	}
 	defer func() { _ = db.Close() }()
 	loadClientExtension(t, db)
-	var connected bool
+	var id string
 	return db.QueryRowContext(t.Context(),
-		"SELECT connected FROM n6k_connect(wsFd => ?, token => '')", fd).Scan(&connected)
+		"SELECT connection_id::VARCHAR FROM n6k_connect(wsFd => ?, token => '')", fd).Scan(&id)
 }
 
 func shortSocketPath(t *testing.T) string {

@@ -71,6 +71,7 @@ dialing parent authenticates; the HELLO token is not checked, and `--api-key` /
 | `--api-key` | token clients must present (`N6KD_API_KEY`) |
 | `--oidc-issuer-url` | OIDC issuer whose JWTs clients must present (`N6KD_OIDC_ISSUER_URL`); not with `--api-key` |
 | `--oidc-audience` | `aud` claim a client's JWT must carry (`N6KD_OIDC_AUDIENCE`); required with `--oidc-issuer-url` |
+| `--oidc-client-id` | public client `n6kd auth login` signs users in with, advertised at `/.well-known/oauth-protected-resource` (`N6KD_OIDC_CLIENT_ID`) |
 | `--load-dotenv[=path]` | load environment variables from `.env` (or `path`) first; variables already set win |
 | `--allow-origin` | browser origins allowed to connect; repeatable, default any (`N6KD_ALLOW_ORIGIN`, comma-separated) |
 | `--lockdown` / `--no-lockdown` | deny served connections filesystem and extension access |

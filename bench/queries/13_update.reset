@@ -1,0 +1,1 @@
+UPDATE r.a SET k = i % 100 WHERE i < 1000;

@@ -1,0 +1,1 @@
+INSERT INTO r.sink SELECT i, k FROM r.a WHERE i < 100000;

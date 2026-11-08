@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 )
@@ -85,4 +86,28 @@ func serverScope(rawURL string) (string, error) {
 		return "", fmt.Errorf("server url %q has no host", rawURL)
 	}
 	return u.Host, nil
+}
+
+// extensionURL turns a configured ws://host:port[/prefix]/ws into the
+// n6k://host:port[/prefix] n6k_connect dials, which adds the /ws itself.
+func extensionURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("server url: %w", err)
+	}
+	switch u.Scheme {
+	case "ws":
+		u.Scheme = "n6k"
+	case "wss":
+		u.Scheme = "n6ks"
+	default:
+		return "", fmt.Errorf("server url %q must be ws:// or wss://", rawURL)
+	}
+	prefix, ok := strings.CutSuffix(u.Path, "/ws")
+	if !ok {
+		return "", fmt.Errorf("server url %q must end in /ws", rawURL)
+	}
+	u.Path = prefix
+	u.RawPath = ""
+	return u.String(), nil
 }

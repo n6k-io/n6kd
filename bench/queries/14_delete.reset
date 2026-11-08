@@ -1,0 +1,1 @@
+INSERT INTO r.a SELECT range, range % 100 FROM range(1000);

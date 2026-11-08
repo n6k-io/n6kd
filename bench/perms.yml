@@ -3,3 +3,7 @@ catalogs:
     tables:
       main.a: {select: true, insert: true, update: true, delete: true}
       main.b: {select: true, insert: true, update: true, delete: true}
+      main.sink: {select: true, insert: true, update: true, delete: true}
+  other:
+    tables:
+      main.b: {select: true}
