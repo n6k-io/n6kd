@@ -628,3 +628,102 @@ func TestAuthLoginFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPServesPermsDocs(t *testing.T) {
+	requireExtensions(t)
+	schemaPath := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte(`
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, status VARCHAR);
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY);
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := perms.Parse([]byte(`
+catalogs:
+  app:
+    description: "Orders and their customers"
+    hints: "Amounts are in cents."
+    prompts:
+      open_orders:
+        description: "List open orders"
+        args:
+          customer: { description: "One customer" }
+        template: "List open orders{{if .customer}} for {{.customer}}{{end}}."
+    tables:
+      main.orders:
+        select: true
+        description: "One row per order"
+        columns: { status: "open | shipped" }
+        examples: ["SELECT * FROM app.main.orders"]
+      main.users:
+        select: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, APIKey: "s3cret"}
+	shop := startServerWith(t, opts, server.Config{MCP: server.NewMCP(rules, "test")})
+	loginAPIKey(t, shop, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"shop": shop})
+
+	prompts, err := cs.ListPrompts(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts.Prompts) != 1 || prompts.Prompts[0].Name != "shop_app_open_orders" {
+		t.Fatalf("prompts %+v", prompts.Prompts)
+	}
+	for args, want := range map[string]string{"": "List open orders.", "bob": "List open orders for bob."} {
+		params := &mcp.GetPromptParams{Name: "shop_app_open_orders"}
+		if args != "" {
+			params.Arguments = map[string]string{"customer": args}
+		}
+		got, err := cs.GetPrompt(t.Context(), params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if text := got.Messages[0].Content.(*mcp.TextContent).Text; text != want {
+			t.Errorf("prompt with %q: %q, want %q", args, text, want)
+		}
+	}
+
+	resources, err := cs.ListResources(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uris []string
+	for _, r := range resources.Resources {
+		uris = append(uris, r.URI)
+	}
+	slices.Sort(uris)
+	if got, want := strings.Join(uris, ","), "n6k://shop/app,n6k://shop/app/main.orders,n6k://shop/app?format=json"; got != want {
+		t.Fatalf("resources %s, want %s", got, want)
+	}
+	read, err := cs.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: "n6k://shop/app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := read.Contents[0].Text; !strings.Contains(text, "## Hints\n\nAmounts are in cents.") || read.Contents[0].URI != "n6k://shop/app" {
+		t.Errorf("read %+v", read.Contents[0])
+	}
+
+	attached := mustCallTool(t, cs, "attach", map[string]any{"server": "shop", "catalog": "app", "alias": "remote"})
+	want := "successfully\n\nOrders and their customers\n\n" +
+		"remote.main.orders: id INTEGER, status VARCHAR\n  One row per order\n  status: open | shipped\n" +
+		"remote.main.users: id INTEGER\n\n" +
+		"full hints and examples: n6k://shop/app"
+	if !strings.HasSuffix(attached, want) {
+		t.Errorf("attach returned %q, want suffix %q", attached, want)
+	}
+}
+
+func TestNewMCPWithoutDocs(t *testing.T) {
+	rules, err := perms.Parse([]byte("catalogs:\n  app:\n    tables:\n      main.users:\n        select: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.NewMCP(rules, "test") != nil || server.NewMCP(nil, "test") != nil {
+		t.Fatal("NewMCP served a server with no docs")
+	}
+}

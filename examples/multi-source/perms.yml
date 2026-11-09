@@ -12,8 +12,21 @@ catalogs:
       main.daily_ridership:
         select: true
   ops:
+    description: "Review notes on taxi zones"
+    hints: "Join zone_reviews.location_id to geo.main.zones.LocationID for zone and borough names."
+    prompts:
+      open_reviews:
+        description: "Summarise open zone reviews"
+        args:
+          borough: { description: "Limit to one borough" }
+        template: "Summarise the open zone reviews{{if .borough}} in {{.borough}}{{end}}, grouped by zone."
     tables:
       main.zone_reviews:
         select: true
         insert: "status = 'open'"
         update: { using: "status = 'open'", check: "status IN ('open', 'resolved')" }
+        description: "One row per review note on a taxi zone"
+        hints: "Close a review by setting status to 'resolved'; reviews cannot be deleted."
+        columns:
+          location_id: "taxi zone, geo.main.zones.LocationID"
+          status: "open | resolved"

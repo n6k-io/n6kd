@@ -12,6 +12,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/n6k-io/n6kd/internal/textfmt"
+	"github.com/n6k-io/n6kd/perms"
 )
 
 func (s *mcpSession) register(server *mcp.Server) {
@@ -40,10 +41,12 @@ func (s *mcpSession) register(server *mcp.Server) {
 		Name: "attach",
 		Description: "Attach a server's catalog to the local DuckDB under an alias. Returns the ATTACH " +
 			"statement run and every table the server grants, one per line as " +
-			"alias.schema.table: column TYPE, ... Query those tables by that full name.",
+			"alias.schema.table: column TYPE, ..., followed by indented notes from the server where it has any. " +
+			"Query those tables by that full name.",
 	}, s.attach)
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "query",
+		Name:        "query",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Run DuckDB SQL that returns rows (SELECT, DESCRIBE, SHOW, SUMMARIZE). Returns CSV " +
 			"with a header line, NULL written as NULL, then the row count. Attached tables are " +
 			"read on the server, which applies its row policies; everything else runs in a local " +
@@ -157,11 +160,23 @@ func (s *mcpSession) attach(ctx context.Context, _ *mcp.CallToolRequest, in atta
 	}
 	sc.attached[alias] = in.Catalog
 
-	tables, err := s.describeTables(ctx, alias)
+	docs, docsURI, err := s.catalogDocs(ctx, sc, in.Catalog)
 	if err != nil {
 		return nil, nil, err
 	}
-	return textResult(fmt.Sprintf("ran `%s` successfully\n\n%s", stmt, tables)), nil, nil
+	tables, err := s.describeTables(ctx, alias, in.Catalog, docs)
+	if err != nil {
+		return nil, nil, err
+	}
+	text := fmt.Sprintf("ran `%s` successfully\n\n", stmt)
+	if docs != nil && docs.Description != "" {
+		text += docs.Description + "\n\n"
+	}
+	text += tables
+	if docsURI != "" {
+		text += "\n\nfull hints and examples: " + docsURI
+	}
+	return textResult(text), nil, nil
 }
 
 func (s *mcpSession) connectAttached(ctx context.Context) error {
@@ -176,7 +191,7 @@ func (s *mcpSession) connectAttached(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (s *mcpSession) describeTables(ctx context.Context, alias string) (string, error) {
+func (s *mcpSession) describeTables(ctx context.Context, alias, catalog string, docs *perms.Catalog) (string, error) {
 	rows, err := s.conn.QueryContext(ctx,
 		`SELECT schema_name, table_name, column_name, data_type FROM duckdb_columns()
 		 WHERE database_name = ? ORDER BY schema_name, table_name, column_index`, alias)
@@ -187,6 +202,15 @@ func (s *mcpSession) describeTables(ctx context.Context, alias string) (string, 
 
 	var b strings.Builder
 	current := ""
+	var notes perms.Table
+	flush := func() {
+		if notes.Description != "" {
+			b.WriteString("\n  " + notes.Description)
+		}
+		for _, column := range slices.Sorted(maps.Keys(notes.Columns)) {
+			b.WriteString("\n  " + column + ": " + notes.Columns[column])
+		}
+	}
 	for rows.Next() {
 		var schema, table, column, typ string
 		if err := rows.Scan(&schema, &table, &column, &typ); err != nil {
@@ -194,9 +218,11 @@ func (s *mcpSession) describeTables(ctx context.Context, alias string) (string, 
 		}
 		if name := alias + "." + schema + "." + table; name != current {
 			if current != "" {
+				flush()
 				b.WriteString("\n")
 			}
 			current = name
+			notes = tableDocs(docs, catalog, schema, table)
 			b.WriteString(name + ": ")
 		} else {
 			b.WriteString(", ")
@@ -209,6 +235,7 @@ func (s *mcpSession) describeTables(ctx context.Context, alias string) (string, 
 	if current == "" {
 		return "no tables", nil
 	}
+	flush()
 	return b.String(), nil
 }
 

@@ -115,6 +115,7 @@ func newRootCmd() *cobra.Command {
 				return socket.serve(cmd.Context(), eng, cfg.Serve, log)
 			}
 			cfg.ProtectedResource = authn.protectedResource()
+			cfg.MCP = server.NewMCP(opts.Perms, buildVersion())
 			return server.Run(cmd.Context(), cfg, eng, log)
 		},
 	}

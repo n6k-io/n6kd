@@ -109,16 +109,19 @@ type mcpSession struct {
 }
 
 type serverConn struct {
-	name, url   string
-	id          string
-	servesMCP   bool
-	remote      *mcp.ClientSession
-	remoteTools []string
-	attached    map[string]string
+	name, url     string
+	id            string
+	servesMCP     bool
+	remote        *mcp.ClientSession
+	remoteTools   []string
+	remotePrompts []string
+	// Remote URI -> the URI it is served as here.
+	remoteResources map[string]string
+	attached        map[string]string
 }
 
 func newServerConn(name, url string) *serverConn {
-	return &serverConn{name: name, url: url, attached: map[string]string{}}
+	return &serverConn{name: name, url: url, attached: map[string]string{}, remoteResources: map[string]string{}}
 }
 
 func (s *mcpSession) lookup(name string) (*serverConn, error) {
