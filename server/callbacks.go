@@ -22,7 +22,7 @@ import (
 // first. They find the session in hosts.
 const (
 	authenticateUDF = "n6kd_authenticate"
-	onTextUDF       = "n6kd_on_text"
+	onTextUDF       = "n6kd_serve_on_text"
 )
 
 // hosts maps a session id to its session for the duration of its CALL. The id
@@ -39,6 +39,7 @@ type host struct {
 
 	mu       sync.Mutex
 	rejected bool
+	admitted bool
 	text     *wstext.Conn
 	mcp      *mcp.ServerSession
 }
@@ -88,6 +89,9 @@ func (h *host) authenticate(token string, capabilities []string) (string, error)
 		appCapabilities = append(appCapabilities, "mcp")
 	}
 	h.log.Debugf("handing session %s to the reactor", h.id.String())
+	h.mu.Lock()
+	h.admitted = true
+	h.mu.Unlock()
 	return jsonString(map[string]any{"catalogs": h.eng.Catalogs(), "app_capabilities": appCapabilities})
 }
 
@@ -124,6 +128,47 @@ func (h *host) close() {
 	if h.text != nil {
 		_ = h.text.Close()
 	}
+}
+
+// closeSessions ends every admitted WebSocket client of eng with 1001 Going Away.
+func closeSessions(ctx context.Context, eng *engine.Engine, log *zap.SugaredLogger) {
+	eachAdmitted(eng, func(h *host) {
+		if _, err := h.session.DB().ExecContext(ctx, "SELECT * FROM n6k_serve_close(?::UUID, ?::INTEGER, ?)",
+			h.id.String(), websocket.CloseGoingAway, "server shutting down"); err != nil {
+			log.Warnf("session %s: close: %v", h.id.String(), err)
+		}
+	})
+}
+
+func eachAdmitted(eng *engine.Engine, fn func(*host)) {
+	hosts.Range(func(_, v any) bool {
+		h := v.(*host)
+		h.mu.Lock()
+		admitted := h.admitted
+		h.mu.Unlock()
+		if h.eng == eng && admitted {
+			fn(h)
+		}
+		return true
+	})
+}
+
+// UpdateServedCatalogs changes what every admitted WebSocket client of eng is
+// served; each gets CATALOGS_CHANGED. Added catalogs must already be attached to the
+// session's database. A session that fails is logged and left as it was.
+func UpdateServedCatalogs(ctx context.Context, eng *engine.Engine, added, removed []string, log *zap.SugaredLogger) {
+	eachAdmitted(eng, func(h *host) {
+		for _, name := range removed {
+			if _, err := h.session.DB().ExecContext(ctx, "SELECT * FROM n6k_serve_remove_catalog(?::UUID, ?)", h.id.String(), name); err != nil {
+				log.Warnf("session %s: stop serving %q: %v", h.id.String(), name, err)
+			}
+		}
+		for _, name := range added {
+			if _, err := h.session.DB().ExecContext(ctx, "SELECT * FROM n6k_serve_add_catalog(?::UUID, ?)", h.id.String(), name); err != nil {
+				log.Warnf("session %s: serve %q: %v", h.id.String(), name, err)
+			}
+		}
+	})
 }
 
 type textSender struct {

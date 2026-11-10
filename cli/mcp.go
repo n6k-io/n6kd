@@ -17,10 +17,11 @@ import (
 
 	"github.com/n6k-io/n6kd/engine"
 	"github.com/n6k-io/n6kd/internal/sqlquote"
+	n6kserver "github.com/n6k-io/n6kd/server"
 )
 
 func newMCPCmd() *cobra.Command {
-	var configPath string
+	var configPath, serveAddr string
 	var debugLogs, jsonLogs bool
 
 	cmd := &cobra.Command{
@@ -44,33 +45,43 @@ func newMCPCmd() *cobra.Command {
 			if configPath == "" {
 				return errors.New("--config is required when the home directory is unknown")
 			}
-			return runMCP(cmd.Context(), configPath, &mcp.StdioTransport{}, log)
+			return runMCP(cmd.Context(), configPath, serveAddr, &mcp.StdioTransport{}, log)
 		},
 	}
 
 	cmd.Flags().StringVar(&configPath, "config", defaultMCPConfigPath(), "servers to connect at startup")
+	cmd.Flags().StringVar(&serveAddr, "serve-addr", "127.0.0.1:0",
+		"address the local DuckDB is served on as an n6k server; serve_info returns its URL and token")
 	cmd.Flags().BoolVar(&debugLogs, "debug", os.Getenv("N6KD_DEBUG") != "", "log connect, attach and query detail")
 	cmd.Flags().BoolVar(&jsonLogs, "json-logging", os.Getenv("N6KD_JSON_LOGGING") != "",
 		"log JSON lines with Cloud Logging severity fields, for log collectors")
 	return cmd
 }
 
-func runMCP(ctx context.Context, configPath string, transport mcp.Transport, log *zap.SugaredLogger) (err error) {
+func runMCP(ctx context.Context, configPath, serveAddr string, transport mcp.Transport, log *zap.SugaredLogger) (err error) {
 	config, err := loadMCPConfig(configPath)
 	if err != nil {
 		return err
 	}
-	db, err := engine.OpenClient(ctx, log)
+	token, err := randomToken()
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, db.Close()) }()
-	conn, err := db.Conn(ctx)
+	eng, err := engine.Open(ctx, engine.Options{APIKey: token}, log)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, eng.Close()) }()
+	// n6k_client refreshes tokens with POST, which DuckDB only implements once httpfs is loaded.
+	if _, err := eng.DB().ExecContext(ctx, "INSTALL httpfs; LOAD httpfs"); err != nil {
+		return fmt.Errorf("load httpfs: %w", err)
+	}
+	conn, err := eng.DB().Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, conn.Close()) }()
-	sendConn, err := db.Conn(ctx)
+	sendConn, err := eng.DB().Conn(ctx)
 	if err != nil {
 		return err
 	}
@@ -78,14 +89,21 @@ func runMCP(ctx context.Context, configPath string, transport mcp.Transport, log
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "n6kd", Version: buildVersion()}, nil)
 	session := &mcpSession{
-		conn: conn, sendConn: sendConn, texts: newTextRoutes(),
+		conn: conn, sendConn: sendConn, texts: newTextRoutes(), eng: eng, serveToken: token,
 		server: server, configPath: configPath, log: log, servers: map[string]*serverConn{},
 	}
 	if err := session.texts.register(conn); err != nil {
 		return err
 	}
 	session.register(server)
+	session.registerServe(server)
 	defer func() { err = errors.Join(err, session.disconnectAll(context.WithoutCancel(ctx))) }()
+
+	stopServe, err := session.serve(ctx, serveAddr)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, stopServe()) }()
 
 	for _, name := range slices.Sorted(maps.Keys(config.Servers)) {
 		sc := newServerConn(name, config.Servers[name].URL)
@@ -102,6 +120,9 @@ type mcpSession struct {
 	conn       *sql.Conn
 	sendConn   *sql.Conn
 	texts      *textRoutes
+	eng        *engine.Engine
+	serveURL   string
+	serveToken string
 	server     *mcp.Server
 	configPath string
 	log        *zap.SugaredLogger
@@ -210,9 +231,17 @@ func (s *mcpSession) disconnect(ctx context.Context, sc *serverConn) error {
 		return nil
 	}
 	remoteErr := s.disconnectRemote(sc)
+	if len(sc.attached) > 0 {
+		n6kserver.UpdateServedCatalogs(ctx, s.eng, nil, slices.Collect(maps.Keys(sc.attached)), s.log)
+	}
 	for alias := range sc.attached {
 		if _, err := s.conn.ExecContext(ctx, "DETACH DATABASE IF EXISTS "+sqlquote.Ident(alias)); err != nil {
 			s.log.Warnf("%s: detach %s: %v; its lease keeps the connection open", sc.name, alias, err)
+		}
+	}
+	if len(sc.attached) > 0 {
+		if _, _, err := s.eng.RefreshCatalogs(ctx); err != nil {
+			s.log.Warnf("refresh served catalogs: %v", err)
 		}
 	}
 	s.texts.close(sc.id)

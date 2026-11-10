@@ -159,6 +159,7 @@ func (s *mcpSession) attach(ctx context.Context, _ *mcp.CallToolRequest, in atta
 		return nil, nil, err
 	}
 	sc.attached[alias] = in.Catalog
+	s.syncServed(ctx)
 
 	docs, docsURI, err := s.catalogDocs(ctx, sc, in.Catalog)
 	if err != nil {

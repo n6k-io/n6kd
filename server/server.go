@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -31,6 +32,8 @@ type Config struct {
 	Serve ServeOptions
 	// ProtectedResource, when set, is served at ProtectedResourcePath.
 	ProtectedResource *ProtectedResource
+	// Ready, when set, is called with the dialable host:port once Run is listening.
+	Ready func(authority string)
 }
 
 const ProtectedResourcePath = "/.well-known/oauth-protected-resource"
@@ -87,8 +90,16 @@ func (o ServeOptions) full(active int64) bool {
 }
 
 func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLogger) error {
+	// Shutdown stops tracking a connection once it is hijacked, so the WebSocket
+	// handlers are waited for here.
+	var handlers sync.WaitGroup
+	router := newRouter(cfg, eng, log)
 	srv := &http.Server{
-		Handler:           newRouter(cfg, eng, log),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlers.Add(1)
+			defer handlers.Done()
+			router.ServeHTTP(w, r)
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -104,6 +115,9 @@ func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLo
 		log.Infof("  %s", attachStatement(authority, catalog))
 	}
 	log.Debugf("health check at http://%s/healthz", authority)
+	if cfg.Ready != nil {
+		cfg.Ready(authority)
+	}
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(listener) }()
@@ -123,6 +137,15 @@ func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLo
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Errorf("shutdown gave up after %v with clients still connected: %v", shutdownGrace, err)
 		return err
+	}
+	closeSessions(shutdownCtx, eng, log)
+	waited := make(chan struct{})
+	go func() { handlers.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-shutdownCtx.Done():
+		log.Errorf("shutdown gave up after %v with WebSocket clients still connected", shutdownGrace)
+		return shutdownCtx.Err()
 	}
 	log.Info("stopped")
 	return nil

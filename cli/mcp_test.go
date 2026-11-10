@@ -2,7 +2,10 @@ package cli
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -104,7 +107,7 @@ func startMCP(t *testing.T, servers map[string]string) (*mcp.ClientSession, stri
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		done <- runMCP(ctx, configPath, serverTransport, zaptest.NewLogger(t).Sugar())
+		done <- runMCP(ctx, configPath, "127.0.0.1:0", serverTransport, zaptest.NewLogger(t).Sugar())
 	}()
 
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(t.Context(), clientTransport, nil)
@@ -135,7 +138,7 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) string {
 	return strings.Join(names, ",")
 }
 
-const localTools = "add_server,attach,execute,list_catalogs,list_servers,query,remove_server"
+const localTools = "add_server,attach,execute,list_catalogs,list_servers,query,remove_server,serve_info"
 
 func requireExtensions(t *testing.T) {
 	t.Helper()
@@ -725,5 +728,149 @@ func TestNewMCPWithoutDocs(t *testing.T) {
 	}
 	if server.NewMCP(rules, "test") != nil || server.NewMCP(nil, "test") != nil {
 		t.Fatal("NewMCP served a server with no docs")
+	}
+}
+
+func serveClient(t *testing.T, info serveInfo, token string) (*sql.DB, string, error) {
+	t.Helper()
+	db, err := engine.OpenClient(t.Context(), zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	target, err := extensionURL(info.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := strings.TrimPrefix(target, "n6k://")
+	if _, err := db.ExecContext(t.Context(), fmt.Sprintf("CREATE SECRET (TYPE n6k, TOKEN '%s', SCOPE '%s')", token, authority)); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	err = db.QueryRowContext(t.Context(), "SELECT connection_id::VARCHAR FROM n6k_connect(url => ?)", target).Scan(&id)
+	return db, id, err
+}
+
+func TestMCPServesItsDuckDB(t *testing.T) {
+	requireExtensions(t)
+	schemaPath := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte(`
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);
+INSERT INTO app.main.users VALUES (1, 'Ada'), (2, 'Grace');
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := perms.Parse([]byte("catalogs:\n  app:\n    tables:\n      main.users:\n        select: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := startServer(t, engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, APIKey: "s3cret"})
+	loginAPIKey(t, users, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"users": users})
+	mustCallTool(t, cs, "attach", map[string]any{"server": "users", "catalog": "app", "alias": "first"})
+
+	var info serveInfo
+	if err := json.Unmarshal([]byte(mustCallTool(t, cs, "serve_info", nil)), &info); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(info.URL, "ws://127.0.0.1:") || !slices.Contains(info.Catalogs, "first") {
+		t.Fatalf("serve_info %+v", info)
+	}
+
+	t.Run("wrong token", func(t *testing.T) {
+		if _, _, err := serveClient(t, info, "wrong"); err == nil || !strings.Contains(err.Error(), "unauthorized") {
+			t.Fatalf("got %v, want an unauthorized error", err)
+		}
+	})
+
+	db, id, err := serveClient(t, info, info.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := func(alias string) int {
+		t.Helper()
+		if _, err := db.ExecContext(t.Context(), fmt.Sprintf("ATTACH '' AS c_%s (TYPE n6k, CONNECTION '%s', CATALOG '%s')", alias, id, alias)); err != nil {
+			t.Fatalf("attach %s: %v", alias, err)
+		}
+		var n int
+		if err := db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT count(*) FROM c_%s.main.users", alias)).Scan(&n); err != nil {
+			t.Fatalf("query %s: %v", alias, err)
+		}
+		return n
+	}
+	if n := count("first"); n != 2 {
+		t.Fatalf("first has %d users, want 2", n)
+	}
+
+	mustCallTool(t, cs, "attach", map[string]any{"server": "users", "catalog": "app", "alias": "second"})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var listed bool
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT count(*) > 0 FROM n6k_list_catalogs(connection => ?::UUID) WHERE catalog_name = 'second'", id).Scan(&listed); err != nil {
+			t.Fatal(err)
+		}
+		if listed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second never listed for the connected client")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := count("second"); n != 2 {
+		t.Fatalf("second has %d users, want 2", n)
+	}
+
+	mustCallTool(t, cs, "remove_server", map[string]any{"name": "users"})
+	if err := json.Unmarshal([]byte(mustCallTool(t, cs, "serve_info", nil)), &info); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(info.Catalogs, []string{"memory"}) {
+		t.Fatalf("catalogs after remove_server %v, want [memory]", info.Catalogs)
+	}
+	var listed string
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT string_agg(catalog_name, ',' ORDER BY catalog_name) FROM n6k_list_catalogs(connection => ?::UUID)", id).Scan(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if listed != "memory" {
+		t.Fatalf("connected client lists %q after remove_server, want memory", listed)
+	}
+}
+
+func TestMCPStopsWithServeClientConnected(t *testing.T) {
+	requireExtensions(t)
+	configPath := writeMCPConfig(t, nil)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runMCP(ctx, configPath, "127.0.0.1:0", serverTransport, zaptest.NewLogger(t).Sugar())
+	}()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(t.Context(), clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	var info serveInfo
+	if err := json.Unmarshal([]byte(mustCallTool(t, cs, "serve_info", nil)), &info); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := serveClient(t, info, info.Token); err != nil {
+		t.Fatal(err)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if errors.Is(err, context.DeadlineExceeded) || (err != nil && !errors.Is(err, context.Canceled)) {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMCP still running 5s after cancel with a serve client connected")
 	}
 }
