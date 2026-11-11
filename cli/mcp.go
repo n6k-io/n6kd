@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -87,7 +88,8 @@ func runMCP(ctx context.Context, configPath, serveAddr string, transport mcp.Tra
 	}
 	defer func() { err = errors.Join(err, sendConn.Close()) }()
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "n6kd", Version: buildVersion()}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "n6kd", Version: buildVersion()},
+		&mcp.ServerOptions{Instructions: startupInstructions(config)})
 	session := &mcpSession{
 		conn: conn, sendConn: sendConn, texts: newTextRoutes(), eng: eng, serveToken: token,
 		server: server, configPath: configPath, log: log, servers: map[string]*serverConn{},
@@ -113,6 +115,19 @@ func runMCP(ctx context.Context, configPath, serveAddr string, transport mcp.Tra
 		}
 	}
 	return server.Run(ctx, transport)
+}
+
+func startupInstructions(config mcpConfig) string {
+	if len(config.Servers) == 0 {
+		return "No n6k servers are configured; add one with add_server."
+	}
+	var b strings.Builder
+	b.WriteString("Configured n6k servers (connected at startup):\n")
+	for _, name := range slices.Sorted(maps.Keys(config.Servers)) {
+		fmt.Fprintf(&b, "- %s: %s\n", name, config.Servers[name].URL)
+	}
+	b.WriteString("Use list_servers for live state; add_server and remove_server change it.")
+	return b.String()
 }
 
 type mcpSession struct {

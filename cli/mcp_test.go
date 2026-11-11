@@ -561,8 +561,8 @@ func TestMCPSameURLUnderTwoNames(t *testing.T) {
 	cs, _ := startMCP(t, map[string]string{"first": url})
 
 	_, err := callTool(t, cs, "add_server", map[string]any{"name": "second", "url": url})
-	if err == nil || !strings.Contains(err.Error(), "already open") {
-		t.Fatalf("add_server got %v, want an already open error", err)
+	if want := `is already added as server "first"`; err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("add_server got %v, want %q", err, want)
 	}
 	if got := mustCallTool(t, cs, "first_echo", map[string]any{"text": "hi"}); got != "echo: hi" {
 		t.Errorf("echo on the first server %q", got)
@@ -872,5 +872,17 @@ func TestMCPStopsWithServeClientConnected(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("runMCP still running 5s after cancel with a serve client connected")
+	}
+}
+
+func TestMCPStartupInstructions(t *testing.T) {
+	url := startUsersEchoServer(t)
+	loginAPIKey(t, url, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"users": url})
+
+	want := "Configured n6k servers (connected at startup):\n- users: " + url +
+		"\nUse list_servers for live state; add_server and remove_server change it."
+	if got := cs.InitializeResult().Instructions; got != want {
+		t.Errorf("instructions %q, want %q", got, want)
 	}
 }

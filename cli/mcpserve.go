@@ -16,8 +16,10 @@ func (s *mcpSession) registerServe(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "serve_info",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-		Description: "Return the n6k server this process serves its local DuckDB on, as JSON " +
-			"{url, token, catalogs}: every attached alias and memory, with the same access as query and execute.",
+		Description: "Return the endpoint this process exposes so other clients (e.g. n6kd-ui set_data) " +
+			"can query its local DuckDB, as JSON {url, token, catalogs}: every attached alias and memory, " +
+			"with the same access as query and execute. It does not list the servers this process is " +
+			"connected to; see list_servers.",
 	}, s.serveInfo)
 }
 
