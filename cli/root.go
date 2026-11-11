@@ -124,6 +124,7 @@ func newRootCmd() *cobra.Command {
 	addDotenvFlag(cmd.PersistentFlags())
 
 	f.register(cmd.Flags(), "per session database")
+	addVersionFlag(cmd)
 	cmd.Flags().StringVar(&cfg.Addr, "addr", defaultAddr(), "address to listen on")
 	cmd.Flags().StringVar(&pprofAddr, "pprof", os.Getenv("N6KD_PPROF"),
 		"address to serve Go's net/http/pprof on; off when empty (N6KD_PPROF)")
