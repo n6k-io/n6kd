@@ -2,7 +2,10 @@ package cli
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -104,7 +107,7 @@ func startMCP(t *testing.T, servers map[string]string) (*mcp.ClientSession, stri
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() {
-		done <- runMCP(ctx, configPath, serverTransport, zaptest.NewLogger(t).Sugar())
+		done <- runMCP(ctx, configPath, "127.0.0.1:0", serverTransport, zaptest.NewLogger(t).Sugar())
 	}()
 
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(t.Context(), clientTransport, nil)
@@ -135,7 +138,7 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) string {
 	return strings.Join(names, ",")
 }
 
-const localTools = "add_server,attach,execute,list_catalogs,list_servers,query,remove_server"
+const localTools = "add_server,attach,execute,list_catalogs,list_servers,query,remove_server,serve_info"
 
 func requireExtensions(t *testing.T) {
 	t.Helper()
@@ -558,8 +561,8 @@ func TestMCPSameURLUnderTwoNames(t *testing.T) {
 	cs, _ := startMCP(t, map[string]string{"first": url})
 
 	_, err := callTool(t, cs, "add_server", map[string]any{"name": "second", "url": url})
-	if err == nil || !strings.Contains(err.Error(), "already open") {
-		t.Fatalf("add_server got %v, want an already open error", err)
+	if want := `is already added as server "first"`; err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("add_server got %v, want %q", err, want)
 	}
 	if got := mustCallTool(t, cs, "first_echo", map[string]any{"text": "hi"}); got != "echo: hi" {
 		t.Errorf("echo on the first server %q", got)
@@ -626,5 +629,260 @@ func TestAuthLoginFlags(t *testing.T) {
 		if err := cmd.ExecuteContext(t.Context()); err == nil || err.Error() != test.want {
 			t.Errorf("%v: got %v, want %q", test.args, err, test.want)
 		}
+	}
+}
+
+func TestMCPServesPermsDocs(t *testing.T) {
+	requireExtensions(t)
+	schemaPath := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte(`
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, status VARCHAR);
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY);
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := perms.Parse([]byte(`
+catalogs:
+  app:
+    description: "Orders and their customers"
+    hints: "Amounts are in cents."
+    prompts:
+      open_orders:
+        description: "List open orders"
+        args:
+          customer: { description: "One customer" }
+        template: "List open orders{{if .customer}} for {{.customer}}{{end}}."
+    tables:
+      main.orders:
+        select: true
+        description: "One row per order"
+        columns: { status: "open | shipped" }
+        examples: ["SELECT * FROM app.main.orders"]
+      main.users:
+        select: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, APIKey: "s3cret"}
+	shop := startServerWith(t, opts, server.Config{MCP: server.NewMCP(rules, "test")})
+	loginAPIKey(t, shop, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"shop": shop})
+
+	prompts, err := cs.ListPrompts(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts.Prompts) != 1 || prompts.Prompts[0].Name != "shop_app_open_orders" {
+		t.Fatalf("prompts %+v", prompts.Prompts)
+	}
+	for args, want := range map[string]string{"": "List open orders.", "bob": "List open orders for bob."} {
+		params := &mcp.GetPromptParams{Name: "shop_app_open_orders"}
+		if args != "" {
+			params.Arguments = map[string]string{"customer": args}
+		}
+		got, err := cs.GetPrompt(t.Context(), params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if text := got.Messages[0].Content.(*mcp.TextContent).Text; text != want {
+			t.Errorf("prompt with %q: %q, want %q", args, text, want)
+		}
+	}
+
+	resources, err := cs.ListResources(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uris []string
+	for _, r := range resources.Resources {
+		uris = append(uris, r.URI)
+	}
+	slices.Sort(uris)
+	if got, want := strings.Join(uris, ","), "n6k://shop/app,n6k://shop/app/main.orders,n6k://shop/app?format=json"; got != want {
+		t.Fatalf("resources %s, want %s", got, want)
+	}
+	read, err := cs.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: "n6k://shop/app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := read.Contents[0].Text; !strings.Contains(text, "## Hints\n\nAmounts are in cents.") || read.Contents[0].URI != "n6k://shop/app" {
+		t.Errorf("read %+v", read.Contents[0])
+	}
+
+	attached := mustCallTool(t, cs, "attach", map[string]any{"server": "shop", "catalog": "app", "alias": "remote"})
+	want := "successfully\n\nOrders and their customers\n\n" +
+		"remote.main.orders: id INTEGER, status VARCHAR\n  One row per order\n  status: open | shipped\n" +
+		"remote.main.users: id INTEGER\n\n" +
+		"full hints and examples: n6k://shop/app"
+	if !strings.HasSuffix(attached, want) {
+		t.Errorf("attach returned %q, want suffix %q", attached, want)
+	}
+}
+
+func TestNewMCPWithoutDocs(t *testing.T) {
+	rules, err := perms.Parse([]byte("catalogs:\n  app:\n    tables:\n      main.users:\n        select: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.NewMCP(rules, "test") != nil || server.NewMCP(nil, "test") != nil {
+		t.Fatal("NewMCP served a server with no docs")
+	}
+}
+
+func serveClient(t *testing.T, info serveInfo, token string) (*sql.DB, string, error) {
+	t.Helper()
+	db, err := engine.OpenClient(t.Context(), zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	target, err := extensionURL(info.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := strings.TrimPrefix(target, "n6k://")
+	if _, err := db.ExecContext(t.Context(), fmt.Sprintf("CREATE SECRET (TYPE n6k, TOKEN '%s', SCOPE '%s')", token, authority)); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	err = db.QueryRowContext(t.Context(), "SELECT connection_id::VARCHAR FROM n6k_connect(url => ?)", target).Scan(&id)
+	return db, id, err
+}
+
+func TestMCPServesItsDuckDB(t *testing.T) {
+	requireExtensions(t)
+	schemaPath := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte(`
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);
+INSERT INTO app.main.users VALUES (1, 'Ada'), (2, 'Grace');
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := perms.Parse([]byte("catalogs:\n  app:\n    tables:\n      main.users:\n        select: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := startServer(t, engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, APIKey: "s3cret"})
+	loginAPIKey(t, users, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"users": users})
+	mustCallTool(t, cs, "attach", map[string]any{"server": "users", "catalog": "app", "alias": "first"})
+
+	var info serveInfo
+	if err := json.Unmarshal([]byte(mustCallTool(t, cs, "serve_info", nil)), &info); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(info.URL, "ws://127.0.0.1:") || !slices.Contains(info.Catalogs, "first") {
+		t.Fatalf("serve_info %+v", info)
+	}
+
+	t.Run("wrong token", func(t *testing.T) {
+		if _, _, err := serveClient(t, info, "wrong"); err == nil || !strings.Contains(err.Error(), "unauthorized") {
+			t.Fatalf("got %v, want an unauthorized error", err)
+		}
+	})
+
+	db, id, err := serveClient(t, info, info.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := func(alias string) int {
+		t.Helper()
+		if _, err := db.ExecContext(t.Context(), fmt.Sprintf("ATTACH '' AS c_%s (TYPE n6k, CONNECTION '%s', CATALOG '%s')", alias, id, alias)); err != nil {
+			t.Fatalf("attach %s: %v", alias, err)
+		}
+		var n int
+		if err := db.QueryRowContext(t.Context(), fmt.Sprintf("SELECT count(*) FROM c_%s.main.users", alias)).Scan(&n); err != nil {
+			t.Fatalf("query %s: %v", alias, err)
+		}
+		return n
+	}
+	if n := count("first"); n != 2 {
+		t.Fatalf("first has %d users, want 2", n)
+	}
+
+	mustCallTool(t, cs, "attach", map[string]any{"server": "users", "catalog": "app", "alias": "second"})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var listed bool
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT count(*) > 0 FROM n6k_list_catalogs(connection => ?::UUID) WHERE catalog_name = 'second'", id).Scan(&listed); err != nil {
+			t.Fatal(err)
+		}
+		if listed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second never listed for the connected client")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := count("second"); n != 2 {
+		t.Fatalf("second has %d users, want 2", n)
+	}
+
+	mustCallTool(t, cs, "remove_server", map[string]any{"name": "users"})
+	if err := json.Unmarshal([]byte(mustCallTool(t, cs, "serve_info", nil)), &info); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(info.Catalogs, []string{"memory"}) {
+		t.Fatalf("catalogs after remove_server %v, want [memory]", info.Catalogs)
+	}
+	var listed string
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT string_agg(catalog_name, ',' ORDER BY catalog_name) FROM n6k_list_catalogs(connection => ?::UUID)", id).Scan(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if listed != "memory" {
+		t.Fatalf("connected client lists %q after remove_server, want memory", listed)
+	}
+}
+
+func TestMCPStopsWithServeClientConnected(t *testing.T) {
+	requireExtensions(t)
+	configPath := writeMCPConfig(t, nil)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runMCP(ctx, configPath, "127.0.0.1:0", serverTransport, zaptest.NewLogger(t).Sugar())
+	}()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(t.Context(), clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	var info serveInfo
+	if err := json.Unmarshal([]byte(mustCallTool(t, cs, "serve_info", nil)), &info); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := serveClient(t, info, info.Token); err != nil {
+		t.Fatal(err)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if errors.Is(err, context.DeadlineExceeded) || (err != nil && !errors.Is(err, context.Canceled)) {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMCP still running 5s after cancel with a serve client connected")
+	}
+}
+
+func TestMCPStartupInstructions(t *testing.T) {
+	url := startUsersEchoServer(t)
+	loginAPIKey(t, url, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"users": url})
+
+	want := "Configured n6k servers (connected at startup):\n- users: " + url +
+		"\nUse list_servers for live state; add_server and remove_server change it."
+	if got := cs.InitializeResult().Instructions; got != want {
+		t.Errorf("instructions %q, want %q", got, want)
 	}
 }

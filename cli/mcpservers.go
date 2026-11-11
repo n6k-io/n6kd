@@ -59,9 +59,17 @@ func (s *mcpSession) addServer(ctx context.Context, _ *mcp.CallToolRequest, in a
 	if _, taken := s.servers[in.Name]; taken {
 		return nil, nil, fmt.Errorf("a server named %q already exists; remove_server it first", in.Name)
 	}
+	target, err := extensionURL(in.URL)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, name := range slices.Sorted(maps.Keys(s.servers)) {
+		if other, err := extensionURL(s.servers[name].url); err == nil && other == target {
+			return nil, nil, fmt.Errorf("%s is already added as server %q; use that name or remove_server it first", in.URL, name)
+		}
+	}
 	var config mcpConfig
 	if in.Persist {
-		var err error
 		if config, err = loadMCPConfig(s.configPath); err != nil {
 			return nil, nil, err
 		}

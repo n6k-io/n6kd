@@ -162,10 +162,12 @@ type Options struct {
 }
 
 type Engine struct {
-	source   *sql.DB
-	opts     Options
-	catalogs []string
-	log      *zap.SugaredLogger
+	source *sql.DB
+	opts   Options
+	log    *zap.SugaredLogger
+
+	catalogsMu sync.RWMutex
+	catalogs   []string
 
 	// The vcatbridge: database ServeQuack serves; nil when it serves the source.
 	quack *sql.DB
@@ -297,28 +299,16 @@ func (e *Engine) validatePolicies(ctx context.Context) error {
 }
 
 func (e *Engine) collectSourceCatalogs(ctx context.Context) error {
-	rows, err := e.source.QueryContext(ctx,
-		`SELECT database_name FROM duckdb_databases() WHERE NOT internal ORDER BY 1`)
+	names, err := e.sourceCatalogs(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return err
-		}
-		e.catalogs = append(e.catalogs, name)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(e.catalogs) == 0 {
+	if len(names) == 0 {
 		return errors.New("no catalogs to serve: the schema left no attached database")
 	}
+	e.catalogs = names
 
-	for _, name := range e.catalogs {
+	for _, name := range names {
 		var tables int
 		if err := e.source.QueryRowContext(ctx,
 			`SELECT count(*) FROM duckdb_tables() WHERE database_name = ?`, name).Scan(&tables); err != nil {
@@ -328,6 +318,51 @@ func (e *Engine) collectSourceCatalogs(ctx context.Context) error {
 			name, textfmt.Plural(tables, "table"))
 	}
 	return nil
+}
+
+func (e *Engine) sourceCatalogs(ctx context.Context) ([]string, error) {
+	rows, err := e.source.QueryContext(ctx,
+		`SELECT database_name FROM duckdb_databases() WHERE NOT internal ORDER BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+// RefreshCatalogs re-reads the source's attached databases in direct mode, so
+// catalogs attached or detached since boot are what new clients are served.
+func (e *Engine) RefreshCatalogs(ctx context.Context) (added, removed []string, err error) {
+	if e.opts.Perms != nil || e.opts.Quack {
+		return nil, nil, errors.New("only direct mode serves the source's catalogs")
+	}
+	names, err := e.sourceCatalogs(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	e.catalogsMu.Lock()
+	defer e.catalogsMu.Unlock()
+	for _, name := range names {
+		if !slices.Contains(e.catalogs, name) {
+			added = append(added, name)
+		}
+	}
+	for _, name := range e.catalogs {
+		if !slices.Contains(names, name) {
+			removed = append(removed, name)
+		}
+	}
+	e.catalogs = names
+	return added, removed, nil
 }
 
 func (e *Engine) Close() error {
@@ -343,5 +378,13 @@ func (e *Engine) Close() error {
 }
 
 func (e *Engine) Catalogs() []string {
+	e.catalogsMu.RLock()
+	defer e.catalogsMu.RUnlock()
 	return e.catalogs
+}
+
+// DB is the source database. Only an embedding process that owns what it serves
+// may use it: in direct mode it is what every client is served.
+func (e *Engine) DB() *sql.DB {
+	return e.source
 }
