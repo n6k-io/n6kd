@@ -84,15 +84,19 @@ func (s *mcpSession) addServer(ctx context.Context, _ *mcp.CallToolRequest, in a
 	}
 	s.servers[in.Name] = sc
 
-	text := fmt.Sprintf("connected %s to %s, serving %s", in.Name, in.URL, textfmt.Plural(len(sc.remoteTools), "tool"))
-	if in.Persist {
-		config.Servers[in.Name] = mcpServerEntry{URL: in.URL}
-		if err := saveMCPConfig(s.configPath, config); err != nil {
-			return nil, nil, fmt.Errorf("%s (not saved: %w)", text, err)
-		}
-		text += ", saved to " + s.configPath
+	text := fmt.Sprintf("connected %s to %s", in.Name, in.URL)
+	if len(sc.remoteTools) > 0 {
+		text += fmt.Sprintf("; also serves %s: %s", textfmt.Plural(len(sc.remoteTools), "MCP tool"), strings.Join(sc.remoteTools, ", "))
 	}
-	return textResult(text), nil, nil
+	text += fmt.Sprintf(". Next: list_catalogs with server %q, then attach a catalog to query it.", in.Name)
+	if !in.Persist {
+		return textResult(text + " Not saved; add again with persist to keep it across restarts."), nil, nil
+	}
+	config.Servers[in.Name] = mcpServerEntry{URL: in.URL}
+	if err := saveMCPConfig(s.configPath, config); err != nil {
+		return nil, nil, fmt.Errorf("%s (not saved: %w)", text, err)
+	}
+	return textResult(text + " Saved to " + s.configPath + "."), nil, nil
 }
 
 type removeServerInput struct {

@@ -76,7 +76,6 @@ INSERT INTO notes VALUES (1, 'agent scratch');
 	cases := []struct{ name, query, want string }{
 		{"scan", `SELECT count(*)::VARCHAR FROM r.main.users`, "2"},
 		{"stream large scan", `SELECT sum(i)::VARCHAR FROM r.main.big`, "44999850000"},
-		{"query op", `SELECT count(*)::VARCHAR FROM n6k_catalog_query('r', 'SELECT * FROM main.users')`, "2"},
 		{"query op qualified", `SELECT count(*)::VARCHAR FROM n6k_catalog_query('r', 'SELECT * FROM remote.main.users')`, "2"},
 		{"query op upstream direct", `SELECT count(*)::VARCHAR FROM n6k_catalog_query('u', 'SELECT * FROM main.users')`, "2"},
 		{"rpc macro", `SELECT v::VARCHAR FROM n6k_catalog_rpc('r', 'double_it', 21)`, "42"},

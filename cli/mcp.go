@@ -213,6 +213,11 @@ func (s *mcpSession) openConnection(ctx context.Context, sc *serverConn) error {
 	if err := s.conn.QueryRowContext(ctx,
 		"SELECT connection_id::VARCHAR, list_contains(capabilities, 'mcp') FROM n6k_connect(url => ?, on_text => '"+onTextUDF+"', on_close => '"+onCloseUDF+"')",
 		target).Scan(&sc.id, &sc.servesMCP); err != nil {
+		if scope, scopeErr := serverScope(sc.url); scopeErr == nil && strings.Contains(err.Error(), "unauthorized") {
+			return fmt.Errorf("connect to %s: no login for %s. Ask the user to run `n6kd auth login %s` "+
+				"(or `n6kd auth login --server %s --api-key KEY` for an API-key server), then restart the "+
+				"n6kd MCP server: logins made after it started are not seen: %w", sc.url, scope, scope, sc.url, err)
+		}
 		return fmt.Errorf("connect to %s: %w", sc.url, err)
 	}
 	s.log.Infof("%s: connected to %s", sc.name, sc.url)

@@ -328,6 +328,15 @@ func TestMCPWithoutSecretIsUnauthorized(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
 		t.Fatalf("got %v, want an unauthorized error", err)
 	}
+	scope, scopeErr := serverScope(orders)
+	if scopeErr != nil {
+		t.Fatal(scopeErr)
+	}
+	for _, want := range []string{"`n6kd auth login " + scope + "`", "restart the n6kd MCP server"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
 }
 
 func TestMCPForwardsRemoteTools(t *testing.T) {
@@ -367,7 +376,8 @@ func TestMCPAddAndRemoveServer(t *testing.T) {
 	}
 
 	added := mustCallTool(t, cs, "add_server", map[string]any{"name": "shop", "url": shop, "persist": true})
-	if want := "connected shop to " + shop + ", serving 1 tool, saved to " + configPath; added != want {
+	if want := "connected shop to " + shop + "; also serves 1 MCP tool: shop_echo. Next: list_catalogs with server \"shop\", " +
+		"then attach a catalog to query it. Saved to " + configPath + "."; added != want {
 		t.Fatalf("add_server %q, want %q", added, want)
 	}
 	if got := toolNames(t, cs); got != localTools+",shop_echo" {
