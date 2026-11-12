@@ -24,8 +24,8 @@ func (s *mcpSession) register(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "add_server",
 		Description: "Connect an n6k server under a name and serve its MCP tools as name_tool. With persist, " +
-			"also save it to the config file so it is connected at the next start. The token comes from " +
-			"the DuckDB secret for the server's host:port (n6kd auth login).",
+			"also save it to the config file so it is connected at the next start. Needs a stored login for its host:port; " +
+			"if unauthorized, ask the user to run n6kd auth login, then restart this MCP server (use persist so it reconnects).",
 	}, s.addServer)
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "remove_server",
