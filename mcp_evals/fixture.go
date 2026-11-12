@@ -103,17 +103,15 @@ func StartServer(t *testing.T, opts engine.Options) string {
 	}
 }
 
-// StartOrdersServer serves app.main.orders (3 rows) behind an API key no test logs in with.
-func StartOrdersServer(t *testing.T) string {
+// StartOrdersServer serves app.main.orders: alice owns ids 1 and 3, bob owns id 2.
+func StartOrdersServer(t *testing.T, opts engine.Options) string {
 	t.Helper()
-	return StartServer(t, engine.Options{
-		APIKey: "s3cret",
-		Boot: BootSQL(t, `
+	opts.Boot = BootSQL(t, `
 ATTACH ':memory:' AS app;
 CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, owner VARCHAR);
 INSERT INTO app.main.orders VALUES (1, 'alice'), (2, 'bob'), (3, 'alice');
-`),
-	})
+`)
+	return StartServer(t, opts)
 }
 
 func BootSQL(t *testing.T, sql string) []engine.Step {

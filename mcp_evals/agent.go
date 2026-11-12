@@ -5,6 +5,7 @@ package mcp_evals
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -30,6 +31,17 @@ type Result struct {
 // Agent runs one prompt to completion. With no MCPServers it has no tools at all.
 type Agent interface {
 	Run(ctx context.Context, req Request) (Result, error)
+}
+
+// Calls counts calls to the MCP tool named tool, on any server.
+func (r Result) Calls(tool string) int {
+	n := 0
+	for _, name := range r.ToolCalls {
+		if strings.HasSuffix(name, "__"+tool) {
+			n++
+		}
+	}
+	return n
 }
 
 func RunAgent(t *testing.T, agent Agent, req Request) Result {

@@ -2,12 +2,16 @@
 
 package mcp_evals
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/n6k-io/n6kd/engine"
+)
 
 func TestNoLoginTellsUserToLoginAndRestart(t *testing.T) {
 	RequireExtensions(t)
 	agent := ClaudeCLI{}
-	orders := StartOrdersServer(t)
+	orders := StartOrdersServer(t, engine.Options{APIKey: "s3cret"})
 
 	run := RunAgent(t, agent, Request{
 		Prompt:     "Using the n6kd tools, how many rows are in the orders table on the orders server?",
