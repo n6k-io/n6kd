@@ -3,13 +3,13 @@
 #   curl -fsSL https://n6k-io.github.io/n6kd/get.sh | sh
 #
 # N6KD_VERSION  release tag to install (default: the latest release)
-# N6KD_HOME     where releases are unpacked (default: ~/.n6kd)
+# N6KD_HOME     where releases are unpacked (default: $XDG_DATA_HOME/n6kd, else ~/.local/share/n6kd)
 # N6KD_BIN_DIR  where the n6kd symlink goes (default: ~/.local/bin)
 
 set -eu
 
 repo="n6k-io/n6kd"
-home="${N6KD_HOME:-$HOME/.n6kd}"
+home="${N6KD_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/n6kd}"
 bin_dir="${N6KD_BIN_DIR:-$HOME/.local/bin}"
 
 fail() {

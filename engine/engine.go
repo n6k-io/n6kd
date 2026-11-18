@@ -24,7 +24,6 @@ import (
 	"github.com/duckdb/duckdb-go/v2"
 	"go.uber.org/zap"
 
-	"github.com/n6k-io/n6kd/internal/sqlquote"
 	"github.com/n6k-io/n6kd/internal/textfmt"
 	"github.com/n6k-io/n6kd/perms"
 )
@@ -40,10 +39,6 @@ const ExtensionHomeEnv = "N6K_EXTENSION_HOME"
 // binary, used when ExtensionHomeEnv is unset.
 const bundledExtensionDir = "extensions"
 
-const ExtensionRepoEnv = "N6K_EXTENSION_REPO"
-
-const defaultExtensionRepo = "https://storage.googleapis.com/n6k-duckdb-release"
-
 // The source only answers bridge scans (vcatbridge). A session is
 // also the end of a client's socket, which needs n6k_client and n6k_server.
 var (
@@ -56,39 +51,6 @@ const bridgeExtension = "vcatbridge"
 // Quack serves over these, from DuckDB's own repository; httpfs must be loaded
 // before lockdown takes extension loading away.
 var quackExtensions = []string{"quack", "httpfs"}
-
-// InstallExtensions downloads every extension n6kd or quack loads into DuckDB's
-// extension_directory.
-func InstallExtensions(ctx context.Context, log *zap.SugaredLogger) error {
-	db, err := sql.Open("duckdb", extensionDSN())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = db.Close() }()
-
-	repo := os.Getenv(ExtensionRepoEnv)
-	if repo == "" {
-		repo = defaultExtensionRepo
-	}
-	for _, name := range sessionExtensions {
-		// #nosec G201 -- name comes from sessionExtensions, repo from the
-		// operator's environment; both are escaped by sqlquote.String.
-		stmt := fmt.Sprintf("INSTALL %s FROM %s", sqlquote.String(name), sqlquote.String(repo))
-		// #nosec G701 -- stmt is built from the constant list and a quoted repo above.
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("install %s: %w", name, err)
-		}
-		log.Infof("installed extension %s from %s", name, repo)
-	}
-	for _, name := range quackExtensions {
-		// #nosec G201 -- name comes from quackExtensions, escaped by sqlquote.String.
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("INSTALL %s", sqlquote.String(name))); err != nil {
-			return fmt.Errorf("install %s: %w", name, err)
-		}
-		log.Infof("installed extension %s", name)
-	}
-	return nil
-}
 
 // The n6k extensions are unsigned, so loading them needs allow_unsigned_extensions.
 func extensionDSN() string {

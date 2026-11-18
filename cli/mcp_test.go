@@ -93,7 +93,7 @@ func writeMCPConfig(t *testing.T, servers map[string]string) string {
 	for name, url := range servers {
 		config.Servers[name] = mcpServerEntry{URL: url}
 	}
-	path := filepath.Join(t.TempDir(), "mcp.yml")
+	path := filepath.Join(t.TempDir(), "mcp.yaml")
 	if err := saveMCPConfig(path, config); err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +608,7 @@ func TestMCPConfigIsStrict(t *testing.T) {
 		{"servers:\n  bad name:\n    url: ws://h:1/ws\n", "must match"},
 		{"servers:\n  shop:\n    url: /ws\n", "has no host"},
 	} {
-		path := filepath.Join(t.TempDir(), "mcp.yml")
+		path := filepath.Join(t.TempDir(), "mcp.yaml")
 		if err := os.WriteFile(path, []byte(test.yaml), 0o600); err != nil {
 			t.Fatal(err)
 		}

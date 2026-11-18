@@ -26,7 +26,7 @@ func newMCPCmd() *cobra.Command {
 	var debugLogs, jsonLogs bool
 
 	cmd := &cobra.Command{
-		Use:   "mcp [--config ~/.n6kd/mcp.yml]",
+		Use:   "mcp [--config ~/.config/n6kd/mcp.yaml]",
 		Short: "Serve MCP over stdio from a scratch DuckDB connected to n6k servers",
 		Long: "Opens an in-memory DuckDB with n6k_client loaded, holds one WebSocket to each\n" +
 			"server in --config, and speaks MCP on stdin/stdout. Servers can also be added and\n" +
@@ -44,7 +44,7 @@ func newMCPCmd() *cobra.Command {
 			defer func() { _ = log.Sync() }()
 
 			if configPath == "" {
-				return errors.New("--config is required when the home directory is unknown")
+				return errors.New("--config is required when neither XDG_CONFIG_HOME nor the home directory is known")
 			}
 			return runMCP(cmd.Context(), configPath, serveAddr, &mcp.StdioTransport{}, log)
 		},

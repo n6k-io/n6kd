@@ -48,7 +48,7 @@ func N6kdMCP(t *testing.T, bin string, servers map[string]string) MCPServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	configPath := filepath.Join(t.TempDir(), "mcp.yml")
+	configPath := filepath.Join(t.TempDir(), "mcp.yaml")
 	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
