@@ -16,9 +16,9 @@ func newInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Download the n6k DuckDB extensions into DuckDB's extension directory",
-		Long: "Installs the extensions this server loads (vcatbridge, n6k_client, n6k_server) from\n" +
-			"the release bucket, and quack and httpfs from DuckDB's, re-downloading any already\n" +
-			"installed unless --skip-installed is given.\n\n" +
+		Long: "Installs the n6k extensions this server loads from the release bucket, and the ones\n" +
+			"quack loads from DuckDB's, re-downloading any already installed unless --skip-installed\n" +
+			"is given.\n\n" +
 			"--config can pin each n6k extension to a release version or tag:\n\n" +
 			"  version: 1\n" +
 			"  extensions:\n" +

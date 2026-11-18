@@ -26,7 +26,7 @@ func newMCPCmd() *cobra.Command {
 	var debugLogs, jsonLogs bool
 
 	cmd := &cobra.Command{
-		Use:   "mcp [--config ~/.config/n6kd/mcp.yaml]",
+		Use:   "mcp",
 		Short: "Serve MCP over stdio from a scratch DuckDB connected to n6k servers",
 		Long: "Opens an in-memory DuckDB with n6k_client loaded, holds one WebSocket to each\n" +
 			"server in --config, and speaks MCP on stdin/stdout. Servers can also be added and\n" +
