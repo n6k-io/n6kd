@@ -39,6 +39,11 @@ func newInstallCmd() *cobra.Command {
 			if configPath == "" {
 				return errors.New("--config is required when neither XDG_CONFIG_HOME nor the home directory is known")
 			}
+			if cmd.Flags().Changed("config") || os.Getenv("N6KD_CONFIG") != "" {
+				if _, err := os.Stat(configPath); err != nil {
+					return err
+				}
+			}
 			config, err := loadConfig(configPath)
 			if err != nil {
 				return err
