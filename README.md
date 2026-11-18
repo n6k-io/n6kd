@@ -9,8 +9,7 @@ curl -fsSL https://n6k-io.github.io/n6kd/get.sh | sh
 ```
 
 Installs the latest release, with its extensions, for Linux, or macOS on arm64.
-`N6KD_VERSION` picks a release, `N6KD_HOME` where it is unpacked
-(`$XDG_DATA_HOME/n6kd`, else `~/.local/share/n6kd`) and `N6KD_BIN_DIR` where the `n6kd` symlink goes (`~/.local/bin`).
+[`get.sh`](site/get.sh) lists the variables that pick the release and where it goes.
 
 ## Examples
 
@@ -83,26 +82,25 @@ dialing parent authenticates; the HELLO token is not checked, and `--api-key` /
 
 ### Commands
 
-- `n6kd install` — download the extensions into DuckDB's extension directory; re-downloads ones already installed unless `--skip-installed` (`N6KD_SKIP_INSTALLED`)
+- `n6kd install` — download the extensions into DuckDB's extension directory
 - `n6kd selftest` — bridge a throwaway catalog end to end
 - `n6kd quack` — serve over DuckDB's quack protocol instead; see below
 
 ### Config
 
-`n6kd install` reads `$XDG_CONFIG_HOME/n6kd/config.yaml` (else `~/.config/n6kd/config.yaml`;
-`--config` or `N6KD_CONFIG` to override). It can pin each n6k extension to a release version or tag:
+`n6kd install` reads `config.yaml` (`n6kd install --help` shows where). It can pin each n6k extension to a release version or tag:
 
 ```yaml
 version: 1
 extensions:
   vcatbridge:
-    version: v0       # tracks v0.x; each n6kd install picks up new builds
+    version: v0
   n6k_client:
     version: v0.2.5
 ```
 
 Unset extensions install the unversioned build. `quack` and `httpfs` come from DuckDB's repository and cannot be pinned.
-`n6kd mcp` keeps its server list beside it, in `mcp.yaml`.
+`n6kd mcp` reads its server list from `mcp.yaml` (`n6kd mcp --help` shows where).
 
 ## Quack
 

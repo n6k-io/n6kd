@@ -10,7 +10,7 @@ server applies the same `perms.yml` to the agent as to anyone else.
 
 ## Setup
 
-List the server in `~/.config/n6kd/mcp.yaml`. `ws://localhost:8080/ws` is the same
+List the server in `mcp.yaml` (`n6kd mcp --help` shows where). `ws://localhost:8080/ws` is the same
 server as `n6k://localhost:8080`:
 
 ```yaml

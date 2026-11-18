@@ -27,8 +27,7 @@ type InstallOptions struct {
 	Versions map[string]string
 }
 
-// VersionedExtensions are the extensions InstallOptions.Versions can pin; the
-// rest come from DuckDB's repository.
+// VersionedExtensions are the extensions InstallOptions.Versions can pin.
 func VersionedExtensions() []string {
 	return slices.Clone(sessionExtensions)
 }
