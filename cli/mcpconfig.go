@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/n6k-io/n6kd/internal/paths"
 )
 
 type mcpConfig struct {
@@ -24,11 +26,11 @@ type mcpServerEntry struct {
 var serverNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 func defaultMCPConfigPath() string {
-	home, err := os.UserHomeDir()
+	dir, err := paths.ConfigDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".n6kd", "mcp.yml")
+	return filepath.Join(dir, "mcp.yaml")
 }
 
 func loadMCPConfig(path string) (mcpConfig, error) {
