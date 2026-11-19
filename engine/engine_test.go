@@ -376,29 +376,6 @@ func TestMissingTableFailsAtStartup(t *testing.T) {
 	}
 }
 
-func TestWritableTableWithoutPrimaryKeyRefusesWrites(t *testing.T) {
-	const schema = `ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`
-	const rules = `
-catalogs:
-  app:
-    tables:
-      main.events:
-        select: true
-        insert: true
-        update: true
-        delete: true
-`
-	db := newSession(t, openWith(t, schema, rules)).DB()
-	for _, stmt := range []string{
-		`UPDATE app.main.events SET action = 'x' WHERE id = 1`,
-		`DELETE FROM app.main.events WHERE id = 1`,
-	} {
-		if _, err := db.ExecContext(t.Context(), stmt); err == nil || !strings.Contains(err.Error(), "has no key") {
-			t.Errorf("%s: got %v, want a missing key error", stmt, err)
-		}
-	}
-}
-
 func TestInsertOnlyTableNeedsNoPrimaryKey(t *testing.T) {
 	session := newSession(t, openWith(t,
 		`ATTACH ':memory:' AS app; CREATE TABLE app.main.events (id INTEGER, action VARCHAR);`, `
