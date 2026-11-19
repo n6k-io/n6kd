@@ -21,6 +21,16 @@ type authFlags struct {
 	apiKey, issuerURL, audience, clientID string
 }
 
+func (f authFlags) mode() server.AuthMode {
+	switch {
+	case f.apiKey != "":
+		return server.AuthAPIKey
+	case f.issuerURL != "":
+		return server.AuthOIDC
+	}
+	return server.AuthNone
+}
+
 func (f authFlags) protectedResource() *server.ProtectedResource {
 	if f.clientID == "" {
 		return nil

@@ -34,7 +34,17 @@ type Config struct {
 	ProtectedResource *ProtectedResource
 	// Ready, when set, is called with the dialable host:port once Run is listening.
 	Ready func(authority string)
+	// Auth only shapes the connect instructions logged at startup.
+	Auth AuthMode
 }
+
+type AuthMode int
+
+const (
+	AuthNone AuthMode = iota
+	AuthAPIKey
+	AuthOIDC
+)
 
 const ProtectedResourcePath = "/.well-known/oauth-protected-resource"
 
@@ -110,10 +120,8 @@ func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLo
 		return err
 	}
 	authority := dialableAuthority(listener.Addr())
-	log.Info("ready, clients attach with:")
-	for _, catalog := range eng.Catalogs() {
-		log.Infof("  %s", attachStatement(authority, catalog))
-	}
+	log.Infof("listening on %s", listener.Addr())
+	log.Info(readyMessage(cfg, authority, eng.Catalogs()))
 	log.Debugf("health check at http://%s/healthz", authority)
 	if cfg.Ready != nil {
 		cfg.Ready(authority)
@@ -149,6 +157,36 @@ func Run(ctx context.Context, cfg Config, eng *engine.Engine, log *zap.SugaredLo
 	}
 	log.Info("stopped")
 	return nil
+}
+
+func readyMessage(cfg Config, authority string, catalogs []string) string {
+	var b strings.Builder
+	b.WriteString("ready\n")
+	step := func(header string, lines ...string) {
+		b.WriteString("\n  " + header + "\n\n")
+		for _, line := range lines {
+			b.WriteString("    " + line + "\n")
+		}
+	}
+	scope := sqlquote.String("n6k://" + authority)
+	switch {
+	case cfg.Auth == AuthAPIKey:
+		step("create the secret:", fmt.Sprintf("CREATE SECRET (TYPE n6k, TOKEN '<api-key>', SCOPE %s);", scope))
+	case cfg.Auth == AuthOIDC && cfg.ProtectedResource != nil:
+		step("sign in once:", "n6kd auth login "+authority)
+	case cfg.Auth == AuthOIDC:
+		step("create the secret:", fmt.Sprintf("CREATE SECRET (TYPE n6k, TOKEN '<jwt>', SCOPE %s);", scope))
+	}
+	header := "attach with:"
+	if cfg.Auth != AuthNone {
+		header = "then attach with:"
+	}
+	attach := make([]string, len(catalogs))
+	for i, catalog := range catalogs {
+		attach[i] = attachStatement(authority, catalog) + ";"
+	}
+	step(header, attach...)
+	return b.String()
 }
 
 // attachStatement is what a client actually runs. CATALOG picks the served

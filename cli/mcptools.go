@@ -12,7 +12,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/n6k-io/n6kd/internal/textfmt"
-	"github.com/n6k-io/n6kd/perms"
 )
 
 func (s *mcpSession) register(server *mcp.Server) {
@@ -40,9 +39,11 @@ func (s *mcpSession) register(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "attach",
 		Description: "Attach a server's catalog to the local DuckDB under an alias. Returns the ATTACH " +
-			"statement run and every table the server grants, one per line as " +
-			"alias.schema.table: column TYPE, ..., followed by indented notes from the server where it has any. " +
-			"Query those tables by that full name.",
+			"statement run, then under tables: every table the server grants, one per line as " +
+			"alias.schema.table: column TYPE, ..., followed by indented notes from the server where it has any, " +
+			"and under functions: every function it serves, one per line as alias.schema.function(param TYPE, ...): kind, " +
+			"followed by its indented comment where it has one. " +
+			"Query those tables and call those functions by that full name.",
 	}, s.attach)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "query",
@@ -174,6 +175,13 @@ func (s *mcpSession) attach(ctx context.Context, _ *mcp.CallToolRequest, in atta
 		text += docs.Description + "\n\n"
 	}
 	text += tables
+	functions, err := s.describeFunctions(ctx, alias)
+	if err != nil {
+		return nil, nil, err
+	}
+	if functions != "" {
+		text += "\n\nfunctions:\n" + functions
+	}
 	if docsURI != "" {
 		text += "\n\nfull hints and examples: " + docsURI
 	}
@@ -190,54 +198,6 @@ func (s *mcpSession) connectAttached(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-func (s *mcpSession) describeTables(ctx context.Context, alias, catalog string, docs *perms.Catalog) (string, error) {
-	rows, err := s.conn.QueryContext(ctx,
-		`SELECT schema_name, table_name, column_name, data_type FROM duckdb_columns()
-		 WHERE database_name = ? ORDER BY schema_name, table_name, column_index`, alias)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var b strings.Builder
-	current := ""
-	var notes perms.Table
-	flush := func() {
-		if notes.Description != "" {
-			b.WriteString("\n  " + notes.Description)
-		}
-		for _, column := range slices.Sorted(maps.Keys(notes.Columns)) {
-			b.WriteString("\n  " + column + ": " + notes.Columns[column])
-		}
-	}
-	for rows.Next() {
-		var schema, table, column, typ string
-		if err := rows.Scan(&schema, &table, &column, &typ); err != nil {
-			return "", err
-		}
-		if name := alias + "." + schema + "." + table; name != current {
-			if current != "" {
-				flush()
-				b.WriteString("\n")
-			}
-			current = name
-			notes = tableDocs(docs, catalog, schema, table)
-			b.WriteString(name + ": ")
-		} else {
-			b.WriteString(", ")
-		}
-		b.WriteString(column + " " + typ)
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
-	}
-	if current == "" {
-		return "no tables", nil
-	}
-	flush()
-	return b.String(), nil
 }
 
 type sqlInput struct {

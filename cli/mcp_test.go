@@ -253,7 +253,7 @@ func TestMCPConnectsWithScopedSecret(t *testing.T) {
 	for _, want := range []string{
 		"ran `ATTACH '' AS \"remote\" (TYPE n6k, CONNECTION '",
 		"CATALOG 'app')` successfully",
-		"\n\nremote.main.orders: id INTEGER, owner VARCHAR",
+		"\n\ntables:\nremote.main.orders: id INTEGER, owner VARCHAR",
 	} {
 		if !strings.Contains(attached, want) {
 			t.Errorf("attach returned %q, want it to contain %q", attached, want)
@@ -274,6 +274,30 @@ func TestMCPConnectsWithScopedSecret(t *testing.T) {
 
 	if got := mustCallTool(t, cs, "list_servers", nil); got != "orders: "+orders+", connected, 0 tools, attached: remote" {
 		t.Errorf("list_servers %q", got)
+	}
+}
+
+func TestMCPAttachListsFunctions(t *testing.T) {
+	requireExtensions(t)
+	schemaPath := filepath.Join(t.TempDir(), "schema.sql")
+	if err := os.WriteFile(schemaPath, []byte(`
+ATTACH ':memory:' AS app;
+CREATE TABLE app.main.users (id INTEGER PRIMARY KEY, name VARCHAR);
+CREATE MACRO app.main.users_named(n) AS TABLE SELECT * FROM app.main.users WHERE name = n;
+COMMENT ON TABLE app.main.users IS 'One row per user';
+COMMENT ON COLUMN app.main.users.name IS 'display name';
+COMMENT ON MACRO TABLE app.main.users_named IS 'users with this name';
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	users := startServer(t, engine.Options{Boot: []engine.Step{{Path: schemaPath}}, APIKey: "s3cret"})
+	loginAPIKey(t, users, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"users": users})
+
+	attached := mustCallTool(t, cs, "attach", map[string]any{"server": "users", "catalog": "app", "alias": "remote"})
+	if want := "\n\ntables:\nremote.main.users: id INTEGER, name VARCHAR\n  One row per user\n  name: display name\n\n" +
+		"functions:\nremote.main.users_named(n ANY): table\n  users with this name"; !strings.HasSuffix(attached, want) {
+		t.Errorf("attach returned %q, want suffix %q", attached, want)
 	}
 }
 
@@ -649,6 +673,10 @@ func TestMCPServesPermsDocs(t *testing.T) {
 ATTACH ':memory:' AS app;
 CREATE TABLE app.main.orders (id INTEGER PRIMARY KEY, status VARCHAR);
 CREATE TABLE app.main.users (id INTEGER PRIMARY KEY);
+COMMENT ON TABLE app.main.orders IS 'hidden by perms';
+COMMENT ON COLUMN app.main.orders.id IS 'order id';
+COMMENT ON COLUMN app.main.orders.status IS 'hidden by perms';
+COMMENT ON TABLE app.main.users IS 'One row per user';
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -722,9 +750,9 @@ catalogs:
 	}
 
 	attached := mustCallTool(t, cs, "attach", map[string]any{"server": "shop", "catalog": "app", "alias": "remote"})
-	want := "successfully\n\nOrders and their customers\n\n" +
-		"remote.main.orders: id INTEGER, status VARCHAR\n  One row per order\n  status: open | shipped\n" +
-		"remote.main.users: id INTEGER\n\n" +
+	want := "successfully\n\nOrders and their customers\n\ntables:\n" +
+		"remote.main.orders: id INTEGER, status VARCHAR\n  One row per order\n  id: order id\n  status: open | shipped\n" +
+		"remote.main.users: id INTEGER\n  One row per user\n\n" +
 		"full hints and examples: n6k://shop/app"
 	if !strings.HasSuffix(attached, want) {
 		t.Errorf("attach returned %q, want suffix %q", attached, want)
