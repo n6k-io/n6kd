@@ -158,7 +158,7 @@ func startEchoServer(t *testing.T, opts engine.Options) string {
 		func(_ context.Context, _ *mcp.CallToolRequest, in echoInput) (*mcp.CallToolResult, any, error) {
 			return textResult("echo: " + in.Text), nil, nil
 		})
-	return startServerWith(t, opts, server.Config{MCP: remote})
+	return startServerWith(t, opts, server.Config{MCP: func(map[string]any) *mcp.Server { return remote }})
 }
 
 func callTool(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) (string, error) {
@@ -195,6 +195,12 @@ func mustCallTool(t *testing.T, cs *mcp.ClientSession, name string, args map[str
 
 func startOrdersServer(t *testing.T) (string, *authtest.Issuer) {
 	t.Helper()
+	opts, issuer := ordersOptions(t)
+	return startServer(t, opts), issuer
+}
+
+func ordersOptions(t *testing.T) (engine.Options, *authtest.Issuer) {
+	t.Helper()
 	if os.Getenv(engine.ExtensionDirEnv) == "" {
 		t.Skipf("%s not set", engine.ExtensionDirEnv)
 	}
@@ -223,7 +229,7 @@ catalogs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	return startServer(t, engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, Verifier: verifier}), issuer
+	return engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, Verifier: verifier}, issuer
 }
 
 func TestMCPConnectsWithScopedSecret(t *testing.T) {
@@ -704,7 +710,7 @@ catalogs:
 		t.Fatal(err)
 	}
 	opts := engine.Options{Boot: []engine.Step{{Path: schemaPath}}, Perms: rules, APIKey: "s3cret"}
-	shop := startServerWith(t, opts, server.Config{MCP: server.NewMCP(rules, "test")})
+	shop := startServerWith(t, opts, server.Config{MCP: server.NewMCP(rules, "test", server.AuthAPIKey)})
 	loginAPIKey(t, shop, "s3cret")
 	cs, _ := startMCP(t, map[string]string{"shop": shop})
 
@@ -759,13 +765,33 @@ catalogs:
 	}
 }
 
-func TestNewMCPWithoutDocs(t *testing.T) {
-	rules, err := perms.Parse([]byte("catalogs:\n  app:\n    tables:\n      main.users:\n        select: true\n"))
-	if err != nil {
+func TestWhoamiAPIKey(t *testing.T) {
+	requireExtensions(t)
+	opts := engine.Options{APIKey: "s3cret"}
+	shop := startServerWith(t, opts, server.Config{MCP: server.NewMCP(nil, "test", server.AuthAPIKey)})
+	loginAPIKey(t, shop, "s3cret")
+	cs, _ := startMCP(t, map[string]string{"shop": shop})
+
+	if got, want := mustCallTool(t, cs, "shop_whoami", nil), `{"auth":"api_key"}`; got != want {
+		t.Errorf("whoami %s, want %s", got, want)
+	}
+}
+
+func TestWhoamiOIDC(t *testing.T) {
+	opts, issuer := ordersOptions(t)
+	orders := startServerWith(t, opts, server.Config{MCP: server.NewMCP(opts.Perms, "test", server.AuthOIDC)})
+	loginAPIKey(t, orders, issuer.Token(t, "n6kd", map[string]any{"sub": "alice"}))
+	cs, _ := startMCP(t, map[string]string{"orders": orders})
+
+	var got struct {
+		Auth   string         `json:"auth"`
+		Claims map[string]any `json:"claims"`
+	}
+	if err := json.Unmarshal([]byte(mustCallTool(t, cs, "orders_whoami", nil)), &got); err != nil {
 		t.Fatal(err)
 	}
-	if server.NewMCP(rules, "test") != nil || server.NewMCP(nil, "test") != nil {
-		t.Fatal("NewMCP served a server with no docs")
+	if got.Auth != "oidc" || got.Claims["sub"] != "alice" || got.Claims["iss"] != issuer.URL {
+		t.Errorf("whoami %+v", got)
 	}
 }
 

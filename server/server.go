@@ -27,8 +27,9 @@ const shutdownGrace = 10 * time.Second
 type Config struct {
 	Addr           string
 	AllowedOrigins []string
-	// MCP, when set, is served on each websocket's text frames to clients that offer `mcp`.
-	MCP   *mcp.Server
+	// MCP, when set, builds the server for each websocket that offers `mcp`, from
+	// its verified claims, and serves it on the websocket's text frames.
+	MCP   func(claims map[string]any) *mcp.Server
 	Serve ServeOptions
 	// ProtectedResource, when set, is served at ProtectedResourcePath.
 	ProtectedResource *ProtectedResource
@@ -45,6 +46,16 @@ const (
 	AuthAPIKey
 	AuthOIDC
 )
+
+func (m AuthMode) String() string {
+	switch m {
+	case AuthAPIKey:
+		return "api_key"
+	case AuthOIDC:
+		return "oidc"
+	}
+	return "none"
+}
 
 const ProtectedResourcePath = "/.well-known/oauth-protected-resource"
 

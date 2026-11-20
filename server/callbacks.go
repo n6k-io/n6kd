@@ -30,12 +30,12 @@ const (
 var hosts sync.Map // duckdb.UUID → *host
 
 type host struct {
-	ctx       context.Context
-	id        duckdb.UUID
-	eng       *engine.Engine
-	session   *engine.Session
-	mcpServer *mcp.Server
-	log       *zap.SugaredLogger
+	ctx     context.Context
+	id      duckdb.UUID
+	eng     *engine.Engine
+	session *engine.Session
+	newMCP  func(map[string]any) *mcp.Server
+	log     *zap.SugaredLogger
 
 	mu       sync.Mutex
 	rejected bool
@@ -82,8 +82,8 @@ func (h *host) authenticate(token string, capabilities []string) (string, error)
 		return "", err
 	}
 	appCapabilities := []string{}
-	if h.mcpServer != nil && slices.Contains(capabilities, "mcp") {
-		if err := h.startMCP(); err != nil {
+	if h.newMCP != nil && slices.Contains(capabilities, "mcp") {
+		if err := h.startMCP(claims); err != nil {
 			return "", err
 		}
 		appCapabilities = append(appCapabilities, "mcp")
@@ -98,9 +98,9 @@ func (h *host) authenticate(token string, capabilities []string) (string, error)
 // The MCP server only answers, so connecting it here sends nothing before
 // HELLO_ACK; its replies go out by n6k_serve_send_text, which waits for the
 // session to register.
-func (h *host) startMCP() error {
+func (h *host) startMCP(claims map[string]any) error {
 	text := wstext.New(textSender{db: h.session.DB(), id: h.id})
-	session, err := h.mcpServer.Connect(h.ctx, text, nil)
+	session, err := h.newMCP(claims).Connect(h.ctx, text, nil)
 	if err != nil {
 		return fmt.Errorf("start mcp session: %w", err)
 	}
