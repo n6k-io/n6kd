@@ -26,17 +26,19 @@ func TableDocsURI(catalog, table string) string {
 // DocsJSONURI serves the catalog's perms.Catalog as JSON.
 func DocsJSONURI(catalog string) string { return DocsURI(catalog) + "?format=json" }
 
-// NewMCP serves file's docs as resources and its prompts as <catalog>_<prompt>.
-// It returns nil when no catalog has docs.
-func NewMCP(file *perms.File, version string) *mcp.Server {
-	if file == nil || len(file.Docs) == 0 {
-		return nil
+// NewMCP builds a connection's MCP server from its verified claims: whoami, file's
+// docs as resources, and its prompts as <catalog>_<prompt>.
+func NewMCP(file *perms.File, version string, auth AuthMode) func(claims map[string]any) *mcp.Server {
+	return func(claims map[string]any) *mcp.Server {
+		server := mcp.NewServer(&mcp.Implementation{Name: "n6kd", Version: version}, nil)
+		addWhoami(server, auth, claims)
+		if file != nil {
+			for _, name := range slices.Sorted(maps.Keys(file.Docs)) {
+				addCatalogDocs(server, name, file.Docs[name])
+			}
+		}
+		return server
 	}
-	server := mcp.NewServer(&mcp.Implementation{Name: "n6kd", Version: version}, nil)
-	for _, name := range slices.Sorted(maps.Keys(file.Docs)) {
-		addCatalogDocs(server, name, file.Docs[name])
-	}
-	return server
 }
 
 func addCatalogDocs(server *mcp.Server, name string, docs perms.Catalog) {

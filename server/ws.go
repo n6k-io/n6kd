@@ -43,7 +43,7 @@ func newOriginCheck(origins []string) func(*http.Request) bool {
 
 var activeSessions atomic.Int64
 
-func serveWS(w http.ResponseWriter, r *http.Request, checkOrigin func(*http.Request) bool, eng *engine.Engine, mcpServer *mcp.Server, opts ServeOptions, log *zap.SugaredLogger) {
+func serveWS(w http.ResponseWriter, r *http.Request, checkOrigin func(*http.Request) bool, eng *engine.Engine, newMCP func(map[string]any) *mcp.Server, opts ServeOptions, log *zap.SugaredLogger) {
 	client := r.RemoteAddr
 	if id := middleware.GetReqID(r.Context()); len(id) >= 6 {
 		client = fmt.Sprintf("%s [%s]", r.RemoteAddr, id[len(id)-6:])
@@ -77,7 +77,7 @@ func serveWS(w http.ResponseWriter, r *http.Request, checkOrigin func(*http.Requ
 	log.Infof("client %s connected, serving %s — %d now connected",
 		client, strings.Join(eng.Catalogs(), ", "), active)
 
-	stats, rejected, err := serveSession(r.Context(), fd, request, eng, mcpServer, opts, log.Named(client))
+	stats, rejected, err := serveSession(r.Context(), fd, request, eng, newMCP, opts, log.Named(client))
 	if err != nil {
 		log.Errorf("client %s failed: %v — %d still connected", client, err, activeSessions.Load()-1)
 		return
@@ -154,7 +154,7 @@ type sessionStats struct {
 
 // serveSession serves the client on fd until its WebSocket closes. The extension
 // owns fd once the CALL binds; before that, fd is closed here.
-func serveSession(ctx context.Context, fd int, request string, eng *engine.Engine, mcpServer *mcp.Server, opts ServeOptions, log *zap.SugaredLogger) (stats sessionStats, rejected bool, err error) {
+func serveSession(ctx context.Context, fd int, request string, eng *engine.Engine, newMCP func(map[string]any) *mcp.Server, opts ServeOptions, log *zap.SugaredLogger) (stats sessionStats, rejected bool, err error) {
 	handedOver := false
 	defer func() {
 		if !handedOver {
@@ -181,13 +181,13 @@ func serveSession(ctx context.Context, fd int, request string, eng *engine.Engin
 	if err != nil {
 		return stats, false, err
 	}
-	h := &host{ctx: ctx, id: id, eng: eng, session: session, mcpServer: mcpServer, log: log}
+	h := &host{ctx: ctx, id: id, eng: eng, session: session, newMCP: newMCP, log: log}
 	hosts.Store(h.id, h)
 	defer hosts.Delete(h.id)
 	defer h.close()
 
 	callbacks := "authenticate => '" + authenticateUDF + "'"
-	if mcpServer != nil {
+	if newMCP != nil {
 		callbacks += ", on_text => '" + onTextUDF + "'"
 	}
 	// #nosec G201 -- the statement holds only a session id, constant UDF names and integers.

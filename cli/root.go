@@ -116,7 +116,7 @@ func newRootCmd() *cobra.Command {
 			}
 			cfg.ProtectedResource = authn.protectedResource()
 			cfg.Auth = authn.mode()
-			cfg.MCP = server.NewMCP(opts.Perms, buildVersion())
+			cfg.MCP = server.NewMCP(opts.Perms, buildVersion(), cfg.Auth)
 			return server.Run(cmd.Context(), cfg, eng, log)
 		},
 	}
