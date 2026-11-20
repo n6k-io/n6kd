@@ -77,13 +77,20 @@ func serveWS(w http.ResponseWriter, r *http.Request, checkOrigin func(*http.Requ
 	log.Infof("client %s connected, serving %s — %d now connected",
 		client, strings.Join(eng.Catalogs(), ", "), active)
 
-	stats, rejected, err := serveSession(r.Context(), fd, request, eng, newMCP, opts, log.Named(client))
+	stats, rejected, admitted, err := serveSession(r.Context(), fd, request, eng, newMCP, opts, log.Named(client))
 	if err != nil {
 		log.Errorf("client %s failed: %v — %d still connected", client, err, activeSessions.Load()-1)
 		return
 	}
 	if rejected {
 		log.Infof("client %s rejected: %v — %d still connected", client, engine.ErrUnauthorized, activeSessions.Load()-1)
+		return
+	}
+	if !admitted {
+		log.Infof("client %s closed before authenticating after %v, %s in / %s out — %d still connected",
+			client, time.Duration(stats.durationMs)*time.Millisecond,
+			traffic(stats.framesIn, stats.bytesIn), traffic(stats.framesOut, stats.bytesOut),
+			activeSessions.Load()-1)
 		return
 	}
 	log.Infof("client %s disconnected after %v, %s in / %s out, %d requests — %d still connected",
@@ -154,7 +161,7 @@ type sessionStats struct {
 
 // serveSession serves the client on fd until its WebSocket closes. The extension
 // owns fd once the CALL binds; before that, fd is closed here.
-func serveSession(ctx context.Context, fd int, request string, eng *engine.Engine, newMCP func(map[string]any) *mcp.Server, opts ServeOptions, log *zap.SugaredLogger) (stats sessionStats, rejected bool, err error) {
+func serveSession(ctx context.Context, fd int, request string, eng *engine.Engine, newMCP func(map[string]any) *mcp.Server, opts ServeOptions, log *zap.SugaredLogger) (stats sessionStats, rejected, admitted bool, err error) {
 	handedOver := false
 	defer func() {
 		if !handedOver {
@@ -164,22 +171,22 @@ func serveSession(ctx context.Context, fd int, request string, eng *engine.Engin
 
 	session, err := eng.OpenSession(ctx, log)
 	if err != nil {
-		return stats, false, fmt.Errorf("open session: %w", err)
+		return stats, false, false, fmt.Errorf("open session: %w", err)
 	}
 	defer func() { err = errors.Join(err, session.Close()) }()
 	if err := registerCallbacks(ctx, session); err != nil {
-		return stats, false, err
+		return stats, false, false, err
 	}
 	// A dedicated connection, because the CALL blocks it until the client leaves.
 	conn, err := session.DB().Conn(ctx)
 	if err != nil {
-		return stats, false, fmt.Errorf("take connection: %w", err)
+		return stats, false, false, fmt.Errorf("take connection: %w", err)
 	}
 	defer func() { err = errors.Join(err, conn.Close()) }()
 
 	id, err := createServeSession(ctx, conn, fd)
 	if err != nil {
-		return stats, false, err
+		return stats, false, false, err
 	}
 	h := &host{ctx: ctx, id: id, eng: eng, session: session, newMCP: newMCP, log: log}
 	hosts.Store(h.id, h)
@@ -198,7 +205,7 @@ func serveSession(ctx context.Context, fd int, request string, eng *engine.Engin
 		&stats.framesIn, &stats.bytesIn, &stats.framesOut, &stats.bytesOut,
 		&stats.requests, &stats.durationMs, &stats.authenticateMs)
 	h.mu.Lock()
-	rejected = h.rejected
+	rejected, admitted = h.rejected, h.admitted
 	h.mu.Unlock()
-	return stats, rejected, err
+	return stats, rejected, admitted, err
 }

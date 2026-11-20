@@ -9,9 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/n6k-io/n6kd/auth"
 	"github.com/n6k-io/n6kd/auth/authtest"
@@ -566,5 +570,32 @@ func TestReadOnlyTableRejectsWriteOverWebSocket(t *testing.T) {
 		t.Fatal("insert into read-only table succeeded over ws")
 	} else {
 		t.Logf("rejected as expected: %v", err)
+	}
+}
+
+func TestClientClosingBeforeAuthenticatingIsLogged(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	srv := httptest.NewServer(newRouter(Config{}, newDirectEngine(t, ""), zap.New(core).Sugar()))
+	t.Cleanup(srv.Close)
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read HELLO: %v", err)
+	}
+	_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	_ = conn.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for logs.FilterMessageSnippet("closed before authenticating").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no \"closed before authenticating\" log; got %v", logs.All())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := logs.FilterMessageSnippet("disconnected after").Len(); n != 0 {
+		t.Errorf("also logged %d \"disconnected after\" lines", n)
 	}
 }
